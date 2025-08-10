@@ -1,289 +1,175 @@
 grammar Compiscript;
 
-// =====================
-// 1) Reglas de PARSER
-// =====================
+// ------------------
+// Parser Rules
+// ------------------
 
-program
-  : (declaration | statement)* EOF
-  ;
+program: statement* EOF;
 
-// --- Declaraciones ---
-declaration
-  : varDecl
-  | constDecl
-  | functionDecl
-  | classDecl
-  ;
-
-varDecl
-  : 'let' ID (':' typeExpr)? ('=' expr)? ';'
-  ;
-
-constDecl
-  : 'const' ID (':' typeExpr)? '=' expr ';'
-  ;
-
-functionDecl
-  : 'function' ID '(' paramList? ')' (':' typeExpr)? block
-  ;
-
-paramList
-  : param (',' param)*
-  ;
-
-param
-  : ID (':' typeExpr)?
-  ;
-
-classDecl
-  : 'class' ID (':' typeExpr)? '{' classMember* '}'
-  ;
-
-classMember
-  : varDecl
-  | functionDecl
-  | constructorDecl
-  ;
-
-constructorDecl
-  : 'function' 'constructor' '(' paramList? ')' block
-  ;
-
-// --- Tipos ---
-typeExpr
-  : primaryType ('[' ']')*                         // arreglos: T[], T[][]
-  ;
-
-primaryType
-  : 'integer' | 'float' | 'string' | 'boolean' | 'void' | ID
-  ;
-
-// --- Sentencias ---
 statement
-  : block
-  | ifStmt
-  | whileStmt
-  | doWhileStmt
-  | forStmt
-  | foreachStmt
-  | switchStmt
-  | tryCatchStmt
-  | returnStmt
-  | breakStmt
-  | continueStmt
-  | exprStmt
+  : variableDeclaration
+  | constantDeclaration
+  | assignment
+  | functionDeclaration
+  | classDeclaration
+  | expressionStatement
+  | printStatement
+  | block
+  | ifStatement
+  | whileStatement
+  | doWhileStatement
+  | forStatement
+  | foreachStatement
+  | tryCatchStatement
+  | switchStatement
+  | breakStatement
+  | continueStatement
+  | returnStatement
   ;
 
-block
-  : '{' (declaration | statement)* '}'
+block: '{' statement* '}';
+
+variableDeclaration
+  : ('let' | 'var') Identifier typeAnnotation? initializer? ';'
   ;
 
-ifStmt
-  : 'if' '(' expr ')' statement ('else' statement)?
+constantDeclaration
+  : 'const' Identifier typeAnnotation? '=' expression ';'
   ;
 
-whileStmt
-  : 'while' '(' expr ')' statement
+typeAnnotation: ':' type;
+initializer: '=' expression;
+
+assignment
+  : Identifier '=' expression ';'
+  | expression '.' Identifier '=' expression ';' // property assignment
   ;
 
-doWhileStmt
-  : 'do' statement 'while' '(' expr ')' ';'
+expressionStatement: expression ';';
+printStatement: 'print' '(' expression ')' ';';
+
+ifStatement: 'if' '(' expression ')' block ('else' block)?;
+whileStatement: 'while' '(' expression ')' block;
+doWhileStatement: 'do' block 'while' '(' expression ')' ';';
+forStatement: 'for' '(' (variableDeclaration | assignment | ';') expression? ';' expression? ')' block;
+foreachStatement: 'foreach' '(' Identifier 'in' expression ')' block;
+breakStatement: 'break' ';';
+continueStatement: 'continue' ';';
+returnStatement: 'return' expression? ';';
+
+tryCatchStatement: 'try' block 'catch' '(' Identifier ')' block;
+
+switchStatement: 'switch' '(' expression ')' '{' switchCase* defaultCase? '}';
+switchCase: 'case' expression ':' statement*;
+defaultCase: 'default' ':' statement*;
+
+functionDeclaration: 'function' Identifier '(' parameters? ')' (':' type)? block;
+parameters: parameter (',' parameter)*;
+parameter: Identifier (':' type)?;
+
+classDeclaration: 'class' Identifier (':' Identifier)? '{' classMember* '}';
+classMember: functionDeclaration | variableDeclaration | constantDeclaration;
+
+// ------------------
+// Expression Rules — Operator Precedence
+// ------------------
+
+expression: assignmentExpr;
+
+assignmentExpr
+  : lhs=leftHandSide '=' assignmentExpr            # AssignExpr
+  | lhs=leftHandSide '.' Identifier '=' assignmentExpr # PropertyAssignExpr
+  | conditionalExpr                                # ExprNoAssign
   ;
 
-forStmt
-  : 'for' '(' forInit? ';' forCond? ';' forUpdate? ')' statement
-  ;
-
-forInit   : (varDecl | exprList);
-forCond   : expr;
-forUpdate : exprList;
-
-foreachStmt
-  : 'foreach' '(' ID 'in' expr ')' statement
-  ;
-
-switchStmt
-  : 'switch' '(' expr ')' '{' caseBlock* defaultBlock? '}'
-  ;
-
-caseBlock
-  : 'case' expr ':' (statement)*
-  ;
-
-defaultBlock
-  : 'default' ':' (statement)*
-  ;
-
-tryCatchStmt
-  : 'try' block 'catch' '(' ID ')' block
-  ;
-
-returnStmt
-  : 'return' expr? ';'
-  ;
-
-breakStmt
-  : 'break' ';'
-  ;
-
-continueStmt
-  : 'continue' ';'
-  ;
-
-exprStmt
-  : exprList ';'
-  ;
-
-exprList
-  : expr (',' expr)*
-  ;
-
-// --- EXPRESIONES (precedencia de menor a mayor) ---
-//  Asignación es derecha-asociativa.
-expr
-  : assignExpr
-  ;
-
-assignExpr
-  : logicalOrExpr (assignOp assignExpr)?
-  ;
-
-assignOp
-  : '='
+conditionalExpr
+  : logicalOrExpr ('?' expression ':' expression)? # TernaryExpr
   ;
 
 logicalOrExpr
-  : logicalAndExpr ('||' logicalAndExpr)*
+  : logicalAndExpr ( '||' logicalAndExpr )*
   ;
 
 logicalAndExpr
-  : equalityExpr ('&&' equalityExpr)*
+  : equalityExpr ( '&&' equalityExpr )*
   ;
 
 equalityExpr
-  : relationalExpr (('==' | '!=') relationalExpr)*
+  : relationalExpr ( ('==' | '!=') relationalExpr )*
   ;
 
 relationalExpr
-  : additiveExpr (('<' | '<=' | '>' | '>=') additiveExpr)*
+  : additiveExpr ( ('<' | '<=' | '>' | '>=') additiveExpr )*
   ;
 
 additiveExpr
-  : multiplicativeExpr (('+' | '-') multiplicativeExpr)*
+  : multiplicativeExpr ( ('+' | '-') multiplicativeExpr )*
   ;
 
 multiplicativeExpr
-  : unaryExpr (('*' | '/') unaryExpr)*
+  : unaryExpr ( ('*' | '/' | '%') unaryExpr )*
   ;
 
 unaryExpr
-  : ('!' | '-' | '+') unaryExpr
-  | postfixExpr
-  ;
-
-postfixExpr
-  : primaryExpr postfixOp*
-  ;
-
-postfixOp
-  : '[' expr ']'              // indexación
-  | '(' argList? ')'          // llamada
-  | '.' ID                    // acceso a propiedad
-  ;
-
-argList
-  : expr (',' expr)*
+  : ('-' | '!') unaryExpr
+  | primaryExpr
   ;
 
 primaryExpr
-  : literal
-  | 'this'
-  | 'new' typeExpr '(' argList? ')'     // instanciación
-  | '(' expr ')'                        // agrupación
-  | ID
+  : literalExpr
+  | leftHandSide
+  | '(' expression ')'
   ;
 
-// --- Literales ---
-literal
-  : INT_LIT
-  | FLOAT_LIT
-  | STRING_LIT
+literalExpr
+  : Literal
+  | arrayLiteral
+  | 'null'
   | 'true'
   | 'false'
-  | 'null'
   ;
 
-// =====================
-// 2) Reglas de LEXER
-// =====================
+leftHandSide
+  : primaryAtom (suffixOp)*
+  ;
 
-// Palabras clave
-IF        : 'if';
-ELSE      : 'else';
-WHILE     : 'while';
-DO        : 'do';
-FOR       : 'for';
-FOREACH   : 'foreach';
-IN        : 'in';
-SWITCH    : 'switch';
-CASE      : 'case';
-DEFAULT   : 'default';
-TRY       : 'try';
-CATCH     : 'catch';
-RETURN    : 'return';
-BREAK     : 'break';
-CONTINUE  : 'continue';
-FUNCTION  : 'function';
-CLASS     : 'class';
-CONSTRUCTOR: 'constructor';
-LET       : 'let';
-CONST     : 'const';
-NEW       : 'new';
-THIS      : 'this';
-TRUE      : 'true';
-FALSE     : 'false';
-NULL      : 'null';
-INTEGER   : 'integer';
-FLOAT     : 'float';
-STRING    : 'string';
-BOOLEAN   : 'boolean';
-VOID      : 'void';
+primaryAtom
+  : Identifier                                 # IdentifierExpr
+  | 'new' Identifier '(' arguments? ')'        # NewExpr
+  | 'this'                                     # ThisExpr
+  ;
 
-// Operadores y signos
-PLUS    : '+';
-MINUS   : '-';
-STAR    : '*';
-DIV     : '/';
-NOT     : '!';
-AND     : '&&';
-OR      : '||';
-EQ      : '==';
-NEQ     : '!=';
-LT      : '<';
-LE      : '<=';
-GT      : '>';
-GE      : '>=';
-ASSIGN  : '=';
+suffixOp
+  : '(' arguments? ')'                        # CallExpr
+  | '[' expression ']'                        # IndexExpr
+  | '.' Identifier                            # PropertyAccessExpr
+  ;
 
-LPAREN  : '(';
-RPAREN  : ')';
-LBRACE  : '{';
-RBRACE  : '}';
-LBRACK  : '[';
-RBRACK  : ']';
-DOT     : '.';
-COMMA   : ',';
-COLON   : ':';
-SEMI    : ';';
+arguments: expression (',' expression)*;
 
-// Identificadores y literales
-ID          : [a-zA-Z_][a-zA-Z_0-9]*;
-INT_LIT     : [0-9]+;
-FLOAT_LIT   : [0-9]+ '.' [0-9]+;
-STRING_LIT  : '"' (~["\\] | '\\' .)* '"';
+arrayLiteral: '[' (expression (',' expression)*)? ']';
 
-// Espacios y comentarios
-WS          : [ \t\r\n]+ -> channel(HIDDEN);
-LINE_COMMENT: '//' ~[\r\n]* -> channel(HIDDEN);
-BLOCK_COMMENT: '/*' .*? '*/' -> channel(HIDDEN);
+// ------------------
+// Types
+// ------------------
+
+type: baseType ('[' ']')*;
+baseType: 'boolean' | 'integer' | 'string' | Identifier;
+
+// ------------------
+// Lexer Rules
+// ------------------
+
+Literal
+  : IntegerLiteral
+  | StringLiteral
+  ;
+
+IntegerLiteral: [0-9]+;
+StringLiteral: '"' (~["\r\n])* '"';
+
+Identifier: [a-zA-Z_][a-zA-Z0-9_]*;
+
+WS: [ \t\r\n]+ -> skip;
+COMMENT: '//' ~[\r\n]* -> skip;
+MULTILINE_COMMENT: '/*' .*? '*/' -> skip;

@@ -14,8 +14,6 @@ Este lenguaje se encuentra basado en Typescript, por lo que representa un subset
 
    docker build --rm . -t csp-image && docker run --rm -ti -v "$(pwd)/program":/program csp-image
 
-
-   docker build --rm . -t compilador-image && docker run --rm -ti -v "$(pwd)/program":/program compilador-image
    ```
 2. **Entender el Entorno**
 

@@ -27,7 +27,7 @@ La preparación de la gramática consiste en definir correctamente las reglas si
 
 - Al proceso de compilación con ANTLR para generar el parser.
 
-### 📌 Ejemplo:
+### 📌 Ej	emplo:
 
 ```antlr
 expr: expr '+' expr   # Suma
@@ -403,4 +403,3 @@ git checkout -b tarea6-visitor
 # implementar cambios
 # push y crear PR
 ```
-
