@@ -1,0 +1,24 @@
+1. Desde PowerShell en tu máquina (fuera del contenedor)
+docker build --rm . -t lab2-image
+docker run --rm -it -v "${PWD}\program:/program" lab2-image
+
+2. Ya dentro del contenedor Docker ANTLR para generar los analizadores:
+ntlr -Dlanguage=Python3 -visitor SimpleLang.g4
+antlr -Dlanguage=Python3 -listener SimpleLang.g4
+
+3.  Ejecuta las pruebas con Visitor (Driver.py)
+python3 Driver.py program_test_pass.txt
+python3 Driver.py program_test_no_pass.txt
+python3 Driver.py program_test_extra_pass.txt
+python3 Driver.py program_test_extra_fail.txt
+
+4. Ejecuta las pruebas con Listener (DriverListener.py)
+python3 DriverListener.py program_test_pass.txt
+python3 DriverListener.py program_test_no_pass.txt
+python3 DriverListener.py program_test_extra_pass.txt
+python3 DriverListener.py program_test_extra_fail.txt
+
+
+ Resultado esperado
+Los archivos *_pass.txt deben mostrar: Type checking passed
+Los archivos *_fail.txt deben mostrar: errores detallados de tipos
