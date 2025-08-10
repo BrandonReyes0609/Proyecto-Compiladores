@@ -9,7 +9,8 @@ def main(argv):
     token_stream = CommonTokenStream(lexer)
     parser = CompiscriptParser(token_stream)
 
-    tree = parser.prog()  # Asegúrate que la regla inicial sea 'prog'
+    #tree = parser.prog()  # Asegúrate que la regla inicial sea 'prog'
+    tree = parser.program()
 
     print(tree.toStringTree(recog=parser))
 
