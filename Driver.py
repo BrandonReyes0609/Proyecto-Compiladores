@@ -8,18 +8,19 @@ def main(argv):
     lexer = CompiscriptLexer(input_stream)
     token_stream = CommonTokenStream(lexer)
     parser = CompiscriptParser(token_stream)
-
-    #tree = parser.prog()  # Asegúrate que la regla inicial sea 'prog'
     tree = parser.program()
-
     print(tree.toStringTree(recog=parser))
 
-    #visitor = TypeCheckVisitor()
-    #try:
-    #    visitor.visit(tree)
-    #    print("Type checking passed")
-    #except TypeError as e:
-    #    print(f"Type checking error: {e}")
+def parse_code_from_string(code: str) -> tuple[str, str]:
+    try:
+        input_stream = InputStream(code)
+        lexer = CompiscriptLexer(input_stream)
+        token_stream = CommonTokenStream(lexer)
+        parser = CompiscriptParser(token_stream)
+        tree = parser.program()
+        return tree.toStringTree(recog=parser), "✔ Compilación exitosa"
+    except Exception as e:
+        return "", "❌ Error al compilar: " + str(e)
 
 if __name__ == '__main__':
     main(sys.argv)
