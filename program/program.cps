@@ -1,9 +1,14 @@
-let a: integer = 5 + 3 * 2;
-let b: string = "hola";
-const PI: integer = 314;
+// Error: variable no declarada
+x = 10;
 
-function saludar(nombre: string): string {
-  return "Hola " + nombre;
+// Error: constante sin inicializar
+const c: boolean;
+
+// Error: comparación incompatible
+if ("hola" < 5) { }
+
+// Error: función llamada con tipos incorrectos
+function mult(a: integer, b: integer): integer {
+    return a * b;
 }
-
-let mensaje = saludar("Mundo");
+var res = mult("texto", 3.5);
