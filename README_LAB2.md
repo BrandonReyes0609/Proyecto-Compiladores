@@ -38,7 +38,7 @@ docker build --rm . -t lab2-image
 ### 2.  **Ejecutar el contenedor**
 
 ```bash
-docker run --rm -it -v "${PWD}/program:/program" lab2-image
+docker run --rm -it -v "$(pwd)/program:/program" lab2-image
 ```
 
  En Windows con PowerShell, reemplaza `${PWD}` por `$(pwd)` o usa la ruta completa.

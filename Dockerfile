@@ -59,7 +59,7 @@ RUN chmod +x /usr/bin/grun
 # Python virtual env
 COPY python-venv.sh .
 RUN chmod +x ./python-venv.sh
-RUN ./python-venv.sh
+RUN bash ./python-venv.sh
 
 COPY requirements.txt .
 # Not production-intended, never do this, this is just a simple example

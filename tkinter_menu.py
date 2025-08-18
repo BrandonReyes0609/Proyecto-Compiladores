@@ -1,142 +1,402 @@
-import tkinter as tk
-from tkinter import filedialog, ttk, Menu
+# tkinter_menu.py — IDE tipo VS Code con panel de Problemas, AST y squiggles
 import os
-from Driver import parse_code_from_string  # Importado desde tu archivo Driver.py
+import re
+import io
+import tkinter as tk
+from tkinter import filedialog, ttk, Menu, messagebox
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+from contextlib import redirect_stdout, redirect_stderr
 
-class CompiscriptIDE:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Compiscript IDE Visual")
-        self.archivo_actual = None
+# IMPORTA la API del Driver dentro de /program
+from program.Driver import parse_code_from_string
 
-        self.setup_menu()
-        self.setup_tabs()
+VSC = {
+    "bg": "#1e1e1e", "fg": "#d4d4d4",
+    "panel": "#252526", "panel_alt": "#2d2d30",
+    "border": "#3c3c3c", "sel_bg": "#264f78",
+    "gutter": "#2b2b2b", "line_hl": "#2a2a2a"
+}
+MONO = ("Consolas", 11)
 
-    def setup_menu(self):
-        menu_bar = Menu(self.root)
+class CodeEditor(ttk.Frame):
+    def __init__(self, master):
+        super().__init__(master, style="Panel.TFrame")
+        self.v_scroll = ttk.Scrollbar(self, orient="vertical")
+        self.h_scroll = ttk.Scrollbar(self, orient="horizontal")
+        self.ln = tk.Text(self, width=6, padx=4, takefocus=0, wrap="none",
+                          bg=VSC["gutter"], fg="#888", bd=0, relief="flat", font=MONO, state="disabled")
+        self.text = tk.Text(self, undo=True, wrap="none",
+                            bg=VSC["bg"], fg=VSC["fg"], insertbackground=VSC["fg"],
+                            selectbackground=VSC["sel_bg"], bd=0, relief="flat", font=MONO)
+        self.text.tag_configure("current_line", background=VSC["line_hl"])
+        self.text.tag_configure("problem_highlight", background="#512020")
+        self.text.tag_configure("squiggle", underline=True)
 
-        menu_cgt = Menu(menu_bar, tearoff=0)
-        menu_cgt.add_command(label="Cargar", command=self.cargar_cgt)
-        menu_cgt.add_separator()
-        menu_cgt.add_command(label="Salir", command=self.root.quit)
-        menu_bar.add_cascade(label="Cargar CGT", menu=menu_cgt)
+        self.text.configure(yscrollcommand=self._on_ys, xscrollcommand=self.h_scroll.set)
+        self.v_scroll.configure(command=self._yview)
+        self.h_scroll.configure(command=self.text.xview)
 
-        menu_prueba = Menu(menu_bar, tearoff=0)
-        menu_prueba.add_command(label="Abrir", command=self.abrir_archivo)
-        menu_prueba.add_command(label="Grabar", command=self.guardar_archivo)
-        menu_prueba.add_command(label="Grabar Assembler", command=self.guardar_assembler)
-        menu_prueba.add_command(label="Compilar", command=self.compilar)
-        menu_bar.add_cascade(label="Archivos de Prueba", menu=menu_prueba)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.ln.grid(row=0, column=0, sticky="ns")
+        self.text.grid(row=0, column=1, sticky="nsew")
+        self.v_scroll.grid(row=0, column=2, sticky="ns")
+        self.h_scroll.grid(row=1, column=0, columnspan=3, sticky="ew")
 
-        self.root.config(menu=menu_bar)
+        self.text.bind("<<Modified>>", self._on_modified)
+        self.text.bind("<Configure>", lambda e: self._recalc_linenums())
+        self.text.bind("<KeyRelease>", self._after_key)
+        self.text.bind("<ButtonRelease>", self._after_key)
 
-    def setup_tabs(self):
-        self.tab_control = ttk.Notebook(self.root)
+        self._status_cb = None
 
-        # Input Text
-        self.text_input = tk.Text(self.tab_control)
-        self.tab_control.add(self.text_input, text="Input Text")
+    def get(self) -> str:
+        return self.text.get("1.0", "end-1c")
+    def set(self, content: str):
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", content)
+        self._recalc_linenums()
+        self._highlight_line()
+        self._report_pos()
+    def goto(self, line: int, col: int = 0, flash: bool = True):
+        try:
+            idx = f"{int(line)}.{max(int(col),0)}"
+            self.text.mark_set("insert", idx); self.text.see(idx)
+            if flash:
+                self.text.tag_remove("problem_highlight", "1.0", "end")
+                self.text.tag_add("problem_highlight", idx, f"{idx} lineend")
+                self.after(800, lambda: self.text.tag_remove("problem_highlight", "1.0", "end"))
+        except Exception:
+            pass
+    def on_status(self, cb): self._status_cb = cb
 
-        # Árbol Sintáctico
-        self.tree_tab = ttk.Frame(self.tab_control)
-        self.tree_view = ttk.Treeview(self.tree_tab)
-        self.tree_view.pack(fill="both", expand=True)
-        self.tab_control.add(self.tree_tab, text="Árbol Sintáctico")
+    def _on_modified(self, *_):
+        if self.text.edit_modified():
+            self.text.edit_modified(False)
+            self._recalc_linenums(); self._highlight_line(); self._report_pos()
+    def _after_key(self, *_):
+        self._recalc_linenums(); self._highlight_line(); self._report_pos()
+    def _recalc_linenums(self):
+        total = int(self.text.index("end-1c").split(".")[0])
+        nums = "\n".join(str(i) for i in range(1, total + 1))
+        self.ln.configure(state="normal"); self.ln.delete("1.0", "end"); self.ln.insert("1.0", nums); self.ln.configure(state="disabled")
+    def _highlight_line(self):
+        self.text.tag_remove("current_line", "1.0", "end")
+        self.text.tag_add("current_line", "insert linestart", "insert lineend+1c")
+    def _report_pos(self):
+        if self._status_cb:
+            ln, col = self.text.index("insert").split(".")
+            self._status_cb(int(ln), int(col))
+    def _on_ys(self, first, last):
+        self.v_scroll.set(first, last); self.ln.yview_moveto(first)
+    def _yview(self, *args):
+        self.text.yview(*args); self.ln.yview(*args)
 
-        # Acciones
-        self.text_acciones = tk.Text(self.tab_control)
-        self.tab_control.add(self.text_acciones, text="Acciones")
+class Explorer(ttk.Frame):
+    def __init__(self, master, on_open):
+        super().__init__(master, style="Panel.TFrame")
+        self.on_open = on_open
+        self.tree = ttk.Treeview(self, show="tree"); self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<<TreeviewOpen>>", self._open_node)
+        self.tree.bind("<Double-1>", self._double)
 
-        # Mensajes
-        self.text_mensajes = tk.Text(self.tab_control)
-        self.tab_control.add(self.text_mensajes, text="Mensajes")
+    def load_root(self, path: str):
+        root = os.path.abspath(path)
+        for i in self.tree.get_children(""): self.tree.delete(i)
+        rid = self.tree.insert("", "end", text=os.path.basename(root) or root, open=True, values=[root])
+        self._fill(rid, root)
 
-        # Código Intermedio
-        self.text_codigo_intermedio = tk.Text(self.tab_control)
-        self.tab_control.add(self.text_codigo_intermedio, text="Código Intermedio Generado")
+    def _fill(self, node, path):
+        try: entries = sorted(os.listdir(path))
+        except Exception: return
+        for name in entries:
+            if name.startswith("."): continue
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                nid = self.tree.insert(node, "end", text=name, values=[full])
+                self.tree.insert(nid, "end", text="…", values=["__lazy__"])
+            else:
+                if name.lower().endswith((".cps", ".cgt", ".txt", ".asm")):
+                    self.tree.insert(node, "end", text=name, values=[full])
 
-        # Código Assembler
-        self.text_codigo_assembler = tk.Text(self.tab_control)
-        self.tab_control.add(self.text_codigo_assembler, text="Código Assembler Generado")
+    def _open_node(self, *_):
+        item = self.tree.focus()
+        if not item: return
+        path = self.tree.item(item, "values")[0]
+        if not os.path.isdir(path): return
+        self.tree.delete(*self.tree.get_children(item))
+        self._fill(item, path)
 
-        self.tab_control.pack(expand=1, fill="both")
+    def _double(self, *_):
+        item = self.tree.focus()
+        if not item: return
+        path = self.tree.item(item, "values")[0]
+        if os.path.isfile(path): self.on_open(path)
 
-    def cargar_cgt(self):
-        archivo = filedialog.askopenfilename(filetypes=[("CGT or Compiscript Files", "*.cgt *.cps"), ("All files", "*.*")])
-        if archivo:
-            with open(archivo, "r", encoding="utf-8") as f:
-                contenido = f.read()
-                self.text_input.delete("1.0", tk.END)
-                self.text_input.insert(tk.END, contenido)
-            self.archivo_actual = archivo
-            self.text_mensajes.insert(tk.END, f"Archivo CGT cargado: {archivo}\n")
+class CompiscriptIDE(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Compiscript IDE — (sin título)")
+        self.geometry("1200x720"); self.minsize(900, 560)
+        self.archivo_actual: Optional[Path] = None
+        self._setup_theme(); self._setup_menu(); self._setup_toolbar()
 
+        self.vsplit = tk.PanedWindow(self, orient=tk.VERTICAL, sashwidth=6, bg=VSC["border"], bd=0, relief="flat")
+        self.vsplit.pack(fill="both", expand=True)
+
+        top = tk.PanedWindow(self.vsplit, orient=tk.HORIZONTAL, sashwidth=6, bg=VSC["border"], bd=0, relief="flat")
+        self.vsplit.add(top, minsize=260)
+
+        self.explorer = Explorer(top, self._open_from_explorer); top.add(self.explorer, minsize=220, width=260)
+        self.editor = CodeEditor(top); top.add(self.editor, minsize=400); self.editor.on_status(self._update_status_bar)
+
+        right = ttk.Frame(top, style="Panel.TFrame"); top.add(right, minsize=240, width=320)
+        ttk.Label(right, text="ÁRBOL SINTÁCTICO", style="Caption.TLabel").pack(anchor="w", padx=8, pady=(8,0))
+        self.tree = ttk.Treeview(right); self.tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        bottom = ttk.Frame(self.vsplit, style="PanelAlt.TFrame"); self.vsplit.add(bottom, minsize=140, height=220)
+        self.tabs = ttk.Notebook(bottom); self.tabs.pack(fill="both", expand=True)
+
+        self.problems = ttk.Treeview(self.tabs, columns=("SEV","LINE","COL","MSG"), show="headings", height=6)
+        for c,w in (("SEV",80),("LINE",60),("COL",60),("MSG",900)):
+            self.problems.heading(c, text=c); self.problems.column(c, width=w, anchor="w")
+        self.problems.bind("<Double-1>", self._jump_to_problem)
+        self.tabs.add(self.problems, text="Problemas")
+
+        self.txt_msg = tk.Text(self.tabs, bg=VSC["panel_alt"], fg=VSC["fg"], bd=0, relief="flat", font=MONO, wrap="word")
+        self.tabs.add(self.txt_msg, text="Mensajes")
+        self.txt_acc = tk.Text(self.tabs, bg=VSC["panel_alt"], fg=VSC["fg"], bd=0, relief="flat", font=MONO, wrap="word")
+        self.tabs.add(self.txt_acc, text="Acciones")
+        self.txt_ir  = tk.Text(self.tabs, bg=VSC["panel_alt"], fg=VSC["fg"], bd=0, relief="flat", font=MONO, wrap="none")
+        self.tabs.add(self.txt_ir, text="Código Intermedio")
+        self.txt_asm = tk.Text(self.tabs, bg=VSC["panel_alt"], fg=VSC["fg"], bd=0, relief="flat", font=MONO, wrap="none")
+        self.tabs.add(self.txt_asm, text="Código Assembler")
+
+        self.status = ttk.Label(self, text="Ln 1, Col 0", style="Status.TLabel", anchor="w"); self.status.pack(fill="x")
+
+        self.explorer.load_root(os.getcwd()); self.editor.set("")
+
+        self.bind_all("<Control-o>", lambda e: self.abrir_archivo())
+        self.bind_all("<Control-s>", lambda e: self.guardar_archivo())
+        self.bind_all("<Control-n>", lambda e: self.nuevo_archivo())
+        self.bind_all("<F5>",        lambda e: self.compilar())
+
+    def _setup_theme(self):
+        self.configure(bg=VSC["panel"])
+        st = ttk.Style(self)
+        try: st.theme_use("clam")
+        except Exception: pass
+        st.configure("Panel.TFrame", background=VSC["panel"])
+        st.configure("PanelAlt.TFrame", background=VSC["panel_alt"])
+        st.configure("Caption.TLabel", background=VSC["panel"], foreground="#bbb")
+        st.configure("Status.TLabel", background=VSC["panel_alt"], foreground="#aaa", padding=(8,2))
+        st.configure("TNotebook", background=VSC["panel"])
+        st.configure("TNotebook.Tab", background=VSC["panel_alt"], foreground=VSC["fg"])
+        st.map("TNotebook.Tab", background=[("selected", VSC["panel"])])
+        st.configure("Treeview", background=VSC["panel_alt"], fieldbackground=VSC["panel_alt"],
+                     foreground=VSC["fg"], bordercolor=VSC["border"])
+        st.configure("Treeview.Heading", background=VSC["panel"], foreground=VSC["fg"])
+
+    def _setup_menu(self):
+        mb = Menu(self)
+        m_cgt = Menu(mb, tearoff=0)
+        m_cgt.add_command(label="Cargar", command=self.cargar_cgt)
+        m_cgt.add_separator(); m_cgt.add_command(label="Salir", command=self.quit)
+        mb.add_cascade(label="Cargar CGT", menu=m_cgt)
+
+        m_pr = Menu(mb, tearoff=0)
+        m_pr.add_command(label="Abrir", command=self.abrir_archivo, accelerator="Ctrl+O")
+        m_pr.add_command(label="Grabar", command=self.guardar_archivo, accelerator="Ctrl+S")
+        m_pr.add_command(label="Nuevo", command=self.nuevo_archivo, accelerator="Ctrl+N")
+        m_pr.add_command(label="Grabar Assembler", command=self.guardar_assembler)
+        m_pr.add_separator(); m_pr.add_command(label="Compilar", command=self.compilar, accelerator="F5")
+        mb.add_cascade(label="Archivo de Prueba", menu=m_pr)
+
+        m_build = Menu(mb, tearoff=0)
+        m_build.add_command(label="Compilar (F5)", command=self.compilar, accelerator="F5")
+        mb.add_cascade(label="Compilar", menu=m_build)
+        self.config(menu=mb)
+
+    def _setup_toolbar(self):
+        bar = ttk.Frame(self, style="Panel.TFrame"); bar.pack(fill="x")
+        def btn(txt, cmd):
+            b = ttk.Button(bar, text=txt, command=cmd); b.pack(side="left", padx=(8,0), pady=6); return b
+        btn("Abrir", self.abrir_archivo); btn("Guardar", self.guardar_archivo); btn("Compilar (F5)", self.compilar)
+
+    # ----- archivos -----
+    def nuevo_archivo(self):
+        self.editor.set(""); self.archivo_actual = None; self._title("(sin título)")
     def abrir_archivo(self):
-        archivo = filedialog.askopenfilename(filetypes=[("Compiscript files", "*.cps"), ("Text files", "*.txt"), ("All files", "*.*")])
-        if archivo:
-            with open(archivo, "r", encoding="utf-8") as f:
-                contenido = f.read()
-                self.text_input.delete("1.0", tk.END)
-                self.text_input.insert(tk.END, contenido)
-            self.archivo_actual = archivo
-            self.text_mensajes.insert(tk.END, f"Archivo abierto: {archivo}\n")
-
+        f = filedialog.askopenfilename(title="Abrir archivo",
+                                       filetypes=[("Compiscript","*.cps"),("Texto","*.txt"),("Todos","*.*")])
+        if not f: return
+        self._open_file(Path(f))
+    def _open_from_explorer(self, path:str): self._open_file(Path(path))
+    def _open_file(self, path:Path):
+        try: content = path.read_text(encoding="utf-8")
+        except Exception as e: return messagebox.showerror("Abrir", f"No se pudo abrir:\n{e}")
+        self.editor.set(content); self.archivo_actual = path; self._title(str(path)); self.explorer.load_root(path.parent)
     def guardar_archivo(self):
-        archivo = filedialog.asksaveasfilename(defaultextension=".cps", filetypes=[("Compiscript files", "*.cps")])
-        if archivo:
-            contenido = self.text_input.get("1.0", tk.END)
-            with open(archivo, "w", encoding="utf-8") as f:
-                f.write(contenido)
-            self.text_mensajes.insert(tk.END, f"Archivo guardado como: {archivo}\n")
-
+        if not self.archivo_actual:
+            f = filedialog.asksaveasfilename(defaultextension=".cps",
+                                             filetypes=[("Compiscript","*.cps"),("Texto","*.txt")])
+            if not f: return
+            self.archivo_actual = Path(f)
+        try:
+            self.archivo_actual.write_text(self.editor.get(), encoding="utf-8")
+            self._msg(f"Guardado: {self.archivo_actual}\n"); self._title(str(self.archivo_actual))
+        except Exception as e: messagebox.showerror("Guardar", f"No se pudo guardar:\n{e}")
     def guardar_assembler(self):
-        archivo = filedialog.asksaveasfilename(defaultextension=".asm", filetypes=[("Assembler files", "*.asm")])
-        if archivo:
-            contenido = self.text_codigo_assembler.get("1.0", tk.END)
-            with open(archivo, "w", encoding="utf-8") as f:
-                f.write(contenido)
-            self.text_mensajes.insert(tk.END, f"Assembler guardado en: {archivo}\n")
+        f = filedialog.asksaveasfilename(defaultextension=".asm", filetypes=[("Assembler","*.asm")])
+        if not f: return
+        try:
+            Path(f).write_text(self.txt_asm.get("1.0","end-1c"), encoding="utf-8")
+            self._msg(f"Assembler guardado en: {f}\n")
+        except Exception as e: messagebox.showerror("Assembler", f"No se pudo guardar:\n{e}")
+    def cargar_cgt(self):
+        f = filedialog.askopenfilename(title="Cargar CGT/Compiscript",
+                                       filetypes=[("CGT/Compiscript","*.cgt *.cps"),("Todos","*.*")])
+        if not f: return
+        try: s = Path(f).read_text(encoding="utf-8")
+        except Exception as e: return messagebox.showerror("Cargar", f"No se pudo leer:\n{e}")
+        self.editor.set(s); self.archivo_actual = Path(f); self._title(str(self.archivo_actual))
+        self._msg(f"Archivo CGT/CPS cargado: {f}\n")
 
+    # ----- compilación -----
     def compilar(self):
-        texto = self.text_input.get("1.0", tk.END).strip()
-        arbol, mensaje = parse_code_from_string(texto)
-        self.text_mensajes.insert(tk.END, mensaje + "\n")
-        if arbol:
-            self.mostrar_arbol(arbol)
+        src = self.editor.get().strip()
+        if not src: return self._msg("Nada que compilar (archivo vacío).\n")
+        self._set_tree("(vacío)"); [self._set_text(w,"") for w in (self.txt_msg,self.txt_acc,self.txt_ir,self.txt_asm)]
+        self._set_problems([]); self._clear_squiggles()
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                result = parse_code_from_string(src)
+        except Exception as e:
+            self._msg(f"❌ Error ejecutando Driver: {e}\n")
+            return messagebox.showerror("Compilar", str(e))
+        printed = (out_buf.getvalue() + err_buf.getvalue())
 
-    def mostrar_arbol(self, arbol_texto):
-        self.tree_view.delete(*self.tree_view.get_children())
-        arbol_texto = arbol_texto.strip()
+        if isinstance(result, dict):
+            tree = result.get("parse_tree",""); messages = (result.get("messages") or "")
+            if printed: messages = (messages + "\n" + printed).strip()
+            actions = result.get("actions","") or ""; ir = result.get("ir","") or ""; asm = result.get("asm","") or ""
+            errors  = result.get("errors") or self._infer_errors(messages)
+            timings = result.get("timings") or {}
+        else:
+            tree=""; messages=(str(result)+("\n"+printed if printed else "")); actions=ir=asm=""; errors=self._infer_errors(messages); timings={}
 
-        def agregar_nodo(padre, tokens):
-            i = 0
-            while i < len(tokens):
-                token = tokens[i]
-                if token == "(":
-                    sub_tokens = []
-                    depth = 1
-                    i += 1
-                    while i < len(tokens) and depth > 0:
-                        if tokens[i] == "(":
-                            depth += 1
-                        elif tokens[i] == ")":
-                            depth -= 1
-                        if depth > 0:
-                            sub_tokens.append(tokens[i])
-                        i += 1
-                    if sub_tokens:
-                        nodo = self.tree_view.insert(padre, "end", text=sub_tokens[0])
-                        agregar_nodo(nodo, sub_tokens[1:])
-                else:
-                    self.tree_view.insert(padre, "end", text=token)
-                    i += 1
+        self._set_tree(tree or "(sin árbol)"); self._set_text(self.txt_msg, messages); self._set_text(self.txt_acc, actions)
+        self._set_text(self.txt_ir, ir); self._set_text(self.txt_asm, asm); self._set_problems(errors); self._apply_squiggles(errors)
 
-        tokens = arbol_texto.replace("(", " ( ").replace(")", " ) ").split()
-        if tokens:
-            raiz = self.tree_view.insert("", "end", text=tokens[1] if tokens[0] == "(" else "Raíz")
-            agregar_nodo(raiz, tokens[1:])
+        if timings:
+            parts=[]
+            if "parse_ms" in timings: parts.append(f"Parse {timings['parse_ms']} ms")
+            if "semantic_ms" in timings: parts.append(f"Semántica {timings['semantic_ms']} ms")
+            if "ir_ms" in timings: parts.append(f"IR {timings['ir_ms']} ms")
+            if "asm_ms" in timings: parts.append(f"ASM {timings['asm_ms']} ms")
+            if parts: self._msg(" | ".join(parts) + "\n")
+
+        if errors: self.tabs.select(self.problems)
+        else: self._msg("✅ Compilación sin errores.\n")
+
+    # ----- AST -----
+    def _set_tree(self, s:str):
+        self.tree.delete(*self.tree.get_children()); txt=(s or "").strip()
+        if not txt: return
+        try:
+            toks = txt.replace("(", " ( ").replace(")", " ) ").split()
+            if not toks: raise ValueError()
+            def add(parent, tokens):
+                i=0
+                while i<len(tokens):
+                    t=tokens[i]
+                    if t=="(":
+                        sub=[]; d=1; i+=1
+                        while i<len(tokens) and d>0:
+                            if tokens[i]=="(": d+=1
+                            elif tokens[i]==")": d-=1
+                            if d>0: sub.append(tokens[i]); i+=1
+                        if sub:
+                            node=self.tree.insert(parent,"end",text=sub[0]); add(node, sub[1:])
+                    else:
+                        self.tree.insert(parent,"end",text=t); i+=1
+            root_label = toks[1] if toks and toks[0]=="(" and len(toks)>1 else "program"
+            root=self.tree.insert("", "end", text=root_label); add(root, toks[1:])
+        except Exception:
+            self.tree.insert("", "end", text=(txt[:120] + ("…" if len(txt)>120 else "")))
+
+    # ----- Problemas / Squiggles -----
+    def _set_problems(self, items: List[Dict[str, Any]]):
+        self.problems.delete(*self.problems.get_children())
+        for it in items or []:
+            sev=(it.get("sev") or "ERROR").upper()
+            line=it.get("line") if it.get("line") is not None else "-"
+            col =it.get("col")  if it.get("col")  is not None else "-"
+            msg =it.get("msg") or ""
+            self.problems.insert("", "end", values=(sev,line,col,msg))
+    def _jump_to_problem(self, *_):
+        sel=self.problems.focus()
+        if not sel: return
+        sev,line,col,msg = self.problems.item(sel,"values")
+        try: self.editor.goto(int(line), int(col))
+        except Exception: pass
+
+    def _clear_squiggles(self):
+        try: self.editor.text.tag_remove("squiggle","1.0","end")
+        except Exception: pass
+    def _apply_squiggles(self, errors):
+        for e in errors or []:
+            if e.get("line") is None: continue
+            try: line=int(e["line"]); col=int(e.get("col",0))
+            except Exception: continue
+            try: self.editor.text.tag_add("squiggle", f"{line}.{col}", f"{line}.end")
+            except Exception: pass
+
+    def _infer_errors(self, text:str)->List[Dict[str,Any]]:
+        if not text: return []
+        out=[]
+        pats=[
+            r"^line\s+(?P<line>\d+)\s*[: ,]\s*(?P<col>\d+)\s*(?P<msg>.*)$",
+            r"^[Ll]í?nea\s+(?P<line>\d+)\s*,?\s*[Cc](?:ol(?:\.|umna)?)?\s*(?P<col>\d+)\s*[:\-]?\s*(?P<msg>.*)$",
+            r"^(?P<msg>mismatched input .+? expecting .+)$",
+            r"^(?P<msg>no viable alternative at input .+)$",
+            r"^(?P<msg>missing .+ at .+)$",
+            r"^(?P<msg>extraneous input .+ expecting .+)$",
+            r"^(?P<msg>token recognition error at: .+)$",
+            r"^(?P<msg>error .+)$",
+        ]
+        for raw in text.splitlines():
+            line=raw.strip()
+            if not line: continue
+            matched=False
+            for pat in pats:
+                m=re.search(pat,line,re.IGNORECASE)
+                if m:
+                    d={"sev":"error","line":None,"col":None,"msg":m.groupdict().get("msg","").strip() or line}
+                    if "line" in m.groupdict() and m.group("line"): 
+                        try: d["line"]=int(m.group("line")); 
+                        except: pass
+                    if "col" in m.groupdict() and m.group("col"):
+                        try: d["col"]=int(m.group("col"));
+                        except: pass
+                    out.append(d); matched=True; break
+            if not matched and ("error" in line.lower() or "missing" in line.lower()):
+                out.append({"sev":"error","line":None,"col":None,"msg":line})
+        return out
+
+    def _set_text(self, w:tk.Text, s:str):
+        w.delete("1.0","end"); 
+        if s: w.insert("1.0", s)
+    def _msg(self, s:str):
+        self.txt_msg.insert("end", s); self.txt_msg.see("end")
+    def _title(self, t:str):
+        self.title(f"Compiscript IDE — {t}")
+    def _update_status_bar(self, ln:int, col:int):
+        path=str(self.archivo_actual) if self.archivo_actual else "(sin título)"
+        self.status.config(text=f"{path}    Ln {ln}, Col {col}")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = CompiscriptIDE(root)
-    root.mainloop()
+    app = CompiscriptIDE()
+    app.mainloop()
