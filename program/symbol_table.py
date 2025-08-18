@@ -1,30 +1,33 @@
-# programm/symbol_table.py
+# program/symbol_table.py
 
 class Symbol:
-    """Representa una entrada en la tabla (una variable o constante)."""
-    def __init__(self, name, type, is_const=False):
+    """Entrada en la tabla (variable, constante o parámetro)."""
+    def __init__(self, name, type, is_const=False, line=None, col=None):
         self.name = name
         self.type = type
         self.is_const = is_const
+        self.line = line
+        self.col = col
 
 class SymbolTable:
-    """Gestiona los símbolos para un ámbito (scope) específico."""
-    def __init__(self, parent=None):
-        self.symbols = {}
-        self.parent = parent # Referencia al ámbito padre
+    """Ámbito (scope) con jerarquía para exportar al IDE."""
+    def __init__(self, parent=None, name="global", level=0):
+        self.symbols = {}      # name -> Symbol
+        self.parent = parent   # scope padre
+        self.children = []     # sub-scopes
+        self.name = name
+        self.level = level
 
-    def insert(self, name, symbol_type, is_const=False):
-        """Inserta un símbolo en el ámbito actual. Retorna False si ya existe."""
+    def insert(self, name, symbol_type, is_const=False, line=None, col=None):
+        """Inserta en el scope actual. False si ya existía."""
         if name in self.symbols:
             return False
-        self.symbols[name] = Symbol(name, symbol_type, is_const)
+        self.symbols[name] = Symbol(name, symbol_type, is_const, line, col)
         return True
 
     def lookup(self, name):
-        """Busca un símbolo en el ámbito actual y, si no lo encuentra, en los ámbitos padres."""
-        symbol = self.symbols.get(name)
-        if symbol:
-            return symbol
-        if self.parent:
-            return self.parent.lookup(name)
-        return None
+        """Busca en este scope y, si no, recursivo en padres."""
+        s = self.symbols.get(name)
+        if s:
+            return s
+        return self.parent.lookup(name) if self.parent else None
