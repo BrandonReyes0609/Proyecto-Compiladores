@@ -14,7 +14,7 @@ from symbol_table import SymbolTable
 class SemanticAnalyzer(CompiscriptVisitor):
     """
     Analizador semántico con:
-      - Comprobación de tipos y ámbitos (tu lógica original, corregida)
+      - Comprobación de tipos y ámbitos
       - Estructura de scopes y símbolos exportable para el IDE (symbol_tree())
         * No depende de que SymbolTable tenga children/name/level.
     """
@@ -98,7 +98,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
 
     # ================= Scopes de bloque =================
     def enter_scope(self, label="block"):
-        """Compat con tu código existente: crea sub-scope genérico."""
+        """Compat: crea sub-scope genérico."""
         self._push_scope(label)
 
     def exit_scope(self):
