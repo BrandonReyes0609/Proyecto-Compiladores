@@ -1,55 +1,46 @@
 # program/semantic_analyzer.py
 
-# Importa los archivos generados por ANTLR desde la carpeta 'scripts'
 from scripts.CompiscriptParser import CompiscriptParser
 from scripts.CompiscriptVisitor import CompiscriptVisitor
 
-# Tipos y tabla de símbolos
 from custom_types import (
-    IntType, FloatType, BoolType, StringType, NullType, VoidType, FunctionType
+    IntType, FloatType, BoolType, StringType, NullType, VoidType,
+    FunctionType, ClassType   # <<< AÑADIDO ClassType
 )
 from symbol_table import SymbolTable
 
 
 class SemanticAnalyzer(CompiscriptVisitor):
-    """
-    Analizador semántico con:
-      - Comprobación de tipos y ámbitos
-      - Estructura de scopes y símbolos exportable para el IDE (symbol_tree())
-        * No depende de que SymbolTable tenga children/name/level.
-    """
     def __init__(self):
-        # Tabla de símbolos para búsquedas semánticas
         self.global_scope = SymbolTable()
         self.current_scope = self.global_scope
 
-        # Errores recolectados
         self.errors = []
-
-        # Retorno esperado en la función actual
         self.current_function_return_type = None
 
-        # ---- Árbol de símbolos para el IDE (independiente de SymbolTable) ----
+        # <<< AÑADIDO: estado para clases >>>
+        self.classes = {}          # "Persona" -> ClassType
+        self.current_class = None  # ClassType o None
+        self.in_class_body = False
+        self.in_function = False   # para distinguir campos vs variables locales
+
+        # ---- Árbol de símbolos para el IDE ----
         self._sym_root = {
             "name": "global",
             "level": 0,
-            "symbols": [],   # [{name,type,const,line,col}]
-            "children": []   # nodos de scopes
+            "symbols": [],
+            "children": []
         }
-        self._sym_stack = [self._sym_root]  # pila paralela al scope semántico
+        self._sym_stack = [self._sym_root]
 
-    # ================= Utilidades de reporte / scopes =================
+    # ================= Utilidades =================
     def _add_error(self, message, ctx):
         line = ctx.start.line
         column = ctx.start.column
         self.errors.append(f"Error en linea {line}:{column}: {message}")
 
     def _push_scope(self, label, ctx=None):
-        """Crea un scope semántico + un nodo de scope para el IDE."""
-        # scope semántico
         self.current_scope = SymbolTable(parent=self.current_scope)
-
-        # nodo para el IDE
         parent_node = self._sym_stack[-1]
         node = {
             "name": str(label),
@@ -61,15 +52,11 @@ class SemanticAnalyzer(CompiscriptVisitor):
         self._sym_stack.append(node)
 
     def _pop_scope(self):
-        """Sale del scope semántico + nodo del IDE."""
-        # scope semántico
         self.current_scope = self.current_scope.parent
-        # nodo IDE
         if len(self._sym_stack) > 1:
             self._sym_stack.pop()
 
     def _record_symbol(self, name, sym_type, is_const, line, col):
-        """Registra el símbolo en el nodo de scope actual (para el IDE)."""
         node = self._sym_stack[-1]
         node["symbols"].append({
             "name": name,
@@ -80,25 +67,48 @@ class SemanticAnalyzer(CompiscriptVisitor):
         })
 
     def _tname(self, t):
-        """Nombre de tipo amigable para el IDE."""
         if t is IntType: return "integer"
         if t is FloatType: return "float"
         if t is BoolType: return "boolean"
         if t is StringType: return "string"
         if t is NullType: return "null"
         if t is VoidType: return "void"
+        if isinstance(t, ClassType):  # <<< nombre legible para clases
+            return t.name
         if isinstance(t, FunctionType):
             args = ", ".join(self._tname(p) for p in t.param_types)
             return f"fn({args}) -> {self._tname(t.return_type)}"
         return str(t)
 
     def symbol_tree(self):
-        """Devuelve el árbol de símbolos jerárquico (para el IDE)."""
         return self._sym_root
+
+    # ===== Helpers de clases =====
+    def _resolve_type_token(self, name: str):
+        """Resuelve nombre de tipo ('integer', 'Persona', etc.)"""
+        prim = {"integer": IntType, "float": FloatType, "boolean": BoolType, "string": StringType, "void": VoidType}
+        return prim.get(name) or self.classes.get(name)
+
+    def _field_type(self, ctype: ClassType, field: str, ctx):
+        t = ctype
+        while t:
+            if field in t.fields:
+                return t.fields[field]
+            t = t.base
+        self._add_error(f"Campo '{field}' no existe en '{ctype.name}'.", ctx)
+        return NullType
+
+    def _method_type(self, ctype: ClassType, name: str, ctx):
+        t = ctype
+        while t:
+            if name in t.methods:
+                return t.methods[name]
+            t = t.base
+        self._add_error(f"Método '{name}' no existe en '{ctype.name}'.", ctx)
+        return FunctionType(VoidType, [])
 
     # ================= Scopes de bloque =================
     def enter_scope(self, label="block"):
-        """Compat: crea sub-scope genérico."""
         self._push_scope(label)
 
     def exit_scope(self):
@@ -108,6 +118,57 @@ class SemanticAnalyzer(CompiscriptVisitor):
         self._push_scope(f"block@{ctx.start.line}:{ctx.start.column}", ctx)
         self.visitChildren(ctx)
         self._pop_scope()
+
+    # ================= CLASES =================
+    # Nota: asumo regla 'ClassDeclaration'; si tu regla se llama distinto,
+    # cambia el nombre del método al que corresponda.
+    def visitClassDeclaration(self, ctx: CompiscriptParser.ClassDeclarationContext):
+        # class Nombre [: Base]? { ... }
+        name = None
+        base = None
+        try:
+            name = ctx.Identifier(0).getText()
+            if ctx.Identifier(1):  # herencia opcional
+                base_name = ctx.Identifier(1).getText()
+                base = self.classes.get(base_name)
+                if base is None:
+                    self._add_error(f"Clase base '{base_name}' no ha sido declarada.", ctx)
+        except Exception:
+            # Fallback por si la API del contexto difiere
+            text = ctx.getText()
+            # classNombre{...} o classNombre:Base{...}
+            try:
+                header = text.split("{", 1)[0]
+                header = header.replace("class", "", 1)
+                if ":" in header:
+                    nm, bs = header.split(":", 1)
+                    name = nm.strip()
+                    base = self.classes.get(bs.strip())
+                else:
+                    name = header.strip()
+            except Exception:
+                name = "<anon-class>"
+
+        ctype = self.classes.get(name)
+        if not ctype:
+            ctype = ClassType(name, base)
+            self.classes[name] = ctype
+        else:
+            # si ya existía, actualiza base si procede
+            if base and ctype.base is None:
+                ctype.base = base
+
+        prev_cls, prev_flag = self.current_class, self.in_class_body
+        self.current_class = ctype
+        self.in_class_body = True
+
+        self._push_scope(f"class {name}", ctx)
+        self.visitChildren(ctx)  # aquí caerán let/func members y se registran abajo
+        self._pop_scope()
+
+        self.current_class = prev_cls
+        self.in_class_body = prev_flag
+        return None
 
     # ================= Expresiones base =================
     def visitLiteralExpr(self, ctx: CompiscriptParser.LiteralExprContext):
@@ -128,6 +189,11 @@ class SemanticAnalyzer(CompiscriptVisitor):
 
     def visitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
         name = ctx.getText()
+        if name == "this":  # <<< soporte de 'this'
+            if self.current_class:
+                return self.current_class
+            self._add_error("'this' usado fuera de una clase.", ctx)
+            return NullType
         symbol = self.current_scope.lookup(name)
         if symbol is None:
             self._add_error(f"'{name}' no ha sido declarado.", ctx)
@@ -135,17 +201,28 @@ class SemanticAnalyzer(CompiscriptVisitor):
         return symbol.type
 
     # ================= Declaraciones =================
-    # Variables (con inferencia y chequeos)
     def visitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
         var_name = ctx.Identifier().getText()
         declared_type = None
         line, col = ctx.start.line, ctx.start.column
 
-        type_map = {"integer": IntType, "float": FloatType, "boolean": BoolType, "string": StringType}
+        # tipo explícito (primitivo o clase)
         if ctx.typeAnnotation():
             declared_type_str = ctx.typeAnnotation().type_().baseType().getText()
-            declared_type = type_map.get(declared_type_str)
+            declared_type = self._resolve_type_token(declared_type_str)
 
+        # CAMPO DE CLASE: let campo: T;  (no insertar en tabla global)
+        if self.in_class_body and not self.in_function:
+            if declared_type is None:
+                self._add_error(f"No se pudo determinar el tipo del campo '{var_name}'.", ctx)
+                return
+            # registra campo en la clase actual
+            self.current_class.fields[var_name] = declared_type
+            self._record_symbol(var_name, declared_type, False, line, col)
+            return
+
+        # Variable local/global normal
+        expr_type = None
         if ctx.initializer():
             expr_type = self.visit(ctx.initializer().expression())
             if declared_type is None:
@@ -164,7 +241,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
         else:
             self._record_symbol(var_name, declared_type, False, line, col)
 
-    # Constantes
     def visitConstantDeclaration(self, ctx: CompiscriptParser.ConstantDeclarationContext):
         if not ctx.expression():
             self._add_error(
@@ -179,9 +255,8 @@ class SemanticAnalyzer(CompiscriptVisitor):
                 f"La constante '{const_name}' debe tener una anotación de tipo explícita.", ctx
             ); return
 
-        type_map = {"integer": IntType, "float": FloatType, "boolean": BoolType, "string": StringType}
         declared_type_str = ctx.typeAnnotation().type_().baseType().getText()
-        declared_type = type_map.get(declared_type_str)
+        declared_type = self._resolve_type_token(declared_type_str)
 
         if not self.current_scope.insert(const_name, declared_type, is_const=True, line=line, col=col):
             self._add_error(f"Identificador '{const_name}' ya declarado.", ctx); return
@@ -195,52 +270,86 @@ class SemanticAnalyzer(CompiscriptVisitor):
                 ctx
             )
 
-    # Funciones y parámetros
+    # ===== Funciones y MÉTODOS =====
     def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
         func_name = ctx.Identifier().getText()
-        type_map = {"integer": IntType, "float": FloatType, "boolean": BoolType, "string": StringType, "void": VoidType}
-
+        # tipos primitivos + void + clases
         return_type = VoidType
         if ctx.type_():
             return_type_str = ctx.type_().baseType().getText()
-            return_type = type_map.get(return_type_str, VoidType)
+            return_type = self._resolve_type_token(return_type_str) or VoidType
 
         param_types = []
         if ctx.parameters():
-            for param_ctx in ctx.parameters().parameter():
-                p = param_ctx.type_().baseType().getText()
-                param_types.append(type_map.get(p))
+            for pctx in ctx.parameters().parameter():
+                p = pctx.type_().baseType().getText()
+                param_types.append(self._resolve_type_token(p))
 
         func_type = FunctionType(return_type, param_types)
 
-        # Declaramos el símbolo de la función en el scope actual
+        # ---- Caso método dentro de clase ----
+        if self.in_class_body and not self.in_function:
+            # Registrar método en la clase (no contaminar el global)
+            if func_name in self.current_class.methods:
+                self._add_error(f"Método '{func_name}' ya ha sido declarado en esta clase.", ctx)
+            else:
+                self.current_class.methods[func_name] = func_type
+                self._record_symbol(func_name, func_type, False, ctx.start.line, ctx.start.column)
+
+            # Entrar al scope del método
+            prev_ret = self.current_function_return_type
+            prev_in_func = self.in_function
+            self.current_function_return_type = return_type
+            self.in_function = True
+
+            self._push_scope(f"method {func_name}", ctx)
+            # (Opcional) insertar 'this' en el scope
+            try:
+                self.current_scope.insert("this", self.current_class, line=ctx.start.line, col=ctx.start.column)
+            except Exception:
+                pass
+
+            # Parámetros
+            if ctx.parameters():
+                for i, pctx in enumerate(ctx.parameters().parameter()):
+                    pname = pctx.Identifier().getText()
+                    ptype = param_types[i]
+                    self.current_scope.insert(pname, ptype, line=pctx.start.line, col=pctx.start.column)
+                    self._record_symbol(pname, ptype, False, pctx.start.line, pctx.start.column)
+
+            # Cuerpo
+            self.visit(ctx.block())
+
+            self._pop_scope()
+            self.in_function = prev_in_func
+            self.current_function_return_type = prev_ret
+            return
+
+        # ---- Función global normal (tu lógica original) ----
         if not self.current_scope.insert(func_name, func_type, line=ctx.start.line, col=ctx.start.column):
             self._add_error(f"Función o variable '{func_name}' ya ha sido declarada en este ámbito.", ctx)
         else:
             self._record_symbol(func_name, func_type, False, ctx.start.line, ctx.start.column)
 
-        # Entramos al scope de la función
-        previous_return_type = self.current_function_return_type
+        prev_ret = self.current_function_return_type
+        prev_in_func = self.in_function
         self.current_function_return_type = return_type
+        self.in_function = True
 
         self._push_scope(f"fn {func_name}", ctx)
 
-        # Parámetros como símbolos del scope de la función
         if ctx.parameters():
-            for i, param_ctx in enumerate(ctx.parameters().parameter()):
-                pname = param_ctx.Identifier().getText()
+            for i, pctx in enumerate(ctx.parameters().parameter()):
+                pname = pctx.Identifier().getText()
                 ptype = param_types[i]
-                # Insertar en tabla real
-                self.current_scope.insert(pname, ptype, line=param_ctx.start.line, col=param_ctx.start.column)
-                # Registrar en árbol para IDE
-                self._record_symbol(pname, ptype, False, param_ctx.start.line, param_ctx.start.column)
+                self.current_scope.insert(pname, ptype, line=pctx.start.line, col=pctx.start.column)
+                self._record_symbol(pname, ptype, False, pctx.start.line, pctx.start.column)
 
-        # Cuerpo
         self.visit(ctx.block())
-
-        # Salir del scope de la función
         self._pop_scope()
-        self.current_function_return_type = previous_return_type
+
+        self.in_function = prev_in_func
+        self.current_function_return_type = prev_ret
 
     # ================= Expresiones aritméticas/lógicas =================
     def visitMultiplicativeExpr(self, ctx: CompiscriptParser.MultiplicativeExprContext):
@@ -323,7 +432,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
         return BoolType
 
     def visitConditionalExpr(self, ctx: CompiscriptParser.ConditionalExprContext):
-        # Por ahora, solo pasamos el control
         return self.visit(ctx.logicalOrExpr())
 
     # ================= Sentencias =================
@@ -357,29 +465,52 @@ class SemanticAnalyzer(CompiscriptVisitor):
                 f"Una función de tipo '{self.current_function_return_type}' debe retornar un valor.", ctx
             )
 
-    # Llamadas a funciones
+    # ================= Llamadas (funciones y métodos) =================
     def visitCallExpr(self, ctx: CompiscriptParser.CallExprContext):
-        # El identificador está en el primaryAtom del leftHandSide padre.
-        callee_name = ctx.parentCtx.primaryAtom().getText()
-        symbol = self.current_scope.lookup(callee_name)
+        callee_text = ctx.parentCtx.primaryAtom().getText()
 
-        if symbol is None:
-            self._add_error(f"Función '{callee_name}' no ha sido declarada.", ctx.parentCtx.primaryAtom())
-            return NullType
+        # ---- Caso método: obj.metodo(...) ----
+        if "." in callee_text:
+            recv_name, meth_name = callee_text.split(".", 1)
 
-        if not isinstance(symbol.type, FunctionType):
-            self._add_error(f"'{callee_name}' no es una función y no se puede llamar.", ctx.parentCtx.primaryAtom())
-            return NullType
+            # tipo del receptor
+            if recv_name == "this":
+                if not self.current_class:
+                    self._add_error("'this' usado fuera de una clase.", ctx)
+                    return NullType
+                recv_type = self.current_class
+            else:
+                sym = self.current_scope.lookup(recv_name)
+                if sym is None:
+                    self._add_error(f"'{recv_name}' no ha sido declarado.", ctx.parentCtx.primaryAtom())
+                    return NullType
+                recv_type = sym.type
 
-        func_type = symbol.type
+            if not isinstance(recv_type, ClassType):
+                self._add_error(f"No se puede llamar '{meth_name}' sobre tipo '{recv_type}'.", ctx)
+                return NullType
+
+            func_type = self._method_type(recv_type, meth_name, ctx)
+
+        else:
+            # ---- Función libre id(...) ----
+            callee_name = callee_text
+            symbol = self.current_scope.lookup(callee_name)
+            if symbol is None:
+                self._add_error(f"Función '{callee_name}' no ha sido declarada.", ctx.parentCtx.primaryAtom())
+                return NullType
+            if not isinstance(symbol.type, FunctionType):
+                self._add_error(f"'{callee_name}' no es una función y no se puede llamar.", ctx.parentCtx.primaryAtom())
+                return NullType
+            func_type = symbol.type
+
+        # Chequeo de argumentos (igual que ya tenías)
         arg_expressions = ctx.arguments().expression() if ctx.arguments() else []
-
         if len(func_type.param_types) != len(arg_expressions):
             self._add_error(
-                f"La función '{callee_name}' esperaba {len(func_type.param_types)} argumentos, "
+                f"La función '{callee_text}' esperaba {len(func_type.param_types)} argumentos, "
                 f"pero recibió {len(arg_expressions)}.", ctx
             )
-            # Devolvemos el tipo esperado para no encadenar más errores
             return func_type.return_type
 
         for i, arg_expr in enumerate(arg_expressions):
@@ -387,11 +518,10 @@ class SemanticAnalyzer(CompiscriptVisitor):
             expected_type = func_type.param_types[i]
             if arg_type != expected_type and not (expected_type == FloatType and arg_type == IntType):
                 self._add_error(
-                    f"Argumento {i+1} de '{callee_name}' es incorrecto. "
+                    f"Argumento {i+1} de '{callee_text}' es incorrecto. "
                     f"Se esperaba '{expected_type}', pero se obtuvo '{arg_type}'.",
                     arg_expr
                 )
-
         return func_type.return_type
 
     # ================= Pasarelas genéricas =================
@@ -399,6 +529,39 @@ class SemanticAnalyzer(CompiscriptVisitor):
         return self.visitChildren(ctx)
 
     def visitPrimaryExpr(self, ctx: CompiscriptParser.PrimaryExprContext):
+        # ( expr )
         if ctx.getChildCount() == 3 and ctx.getChild(0).getText() == '(':
             return self.visit(ctx.expression())
+
+        # <<< NEW: new Clase(...) devuelve ClassType (sin chequear ctor aquí) >>>
+        try:
+            if ctx.getChildCount() >= 2 and ctx.getChild(0).getText() == 'new':
+                cname = ctx.getChild(1).getText()
+                c = self.classes.get(cname)
+                if not c:
+                    self._add_error(f"Clase '{cname}' no ha sido declarada.", ctx)
+                    return NullType
+                return c
+        except Exception:
+            pass
+
+        # <<< NEW: acceso a campo simple: this.x o id.x (no es llamada) >>>
+        txt = ctx.getText()
+        if "." in txt and "(" not in txt:
+            base, attr = txt.split(".", 1)
+            if base == "this":
+                if not self.current_class:
+                    self._add_error("'this' usado fuera de una clase.", ctx)
+                    return NullType
+                return self._field_type(self.current_class, attr, ctx)
+            else:
+                sym = self.current_scope.lookup(base)
+                if sym is None:
+                    self._add_error(f"'{base}' no ha sido declarado.", ctx)
+                    return NullType
+                if not isinstance(sym.type, ClassType):
+                    self._add_error(f"No se puede acceder a '.{attr}' sobre tipo '{sym.type}'.", ctx)
+                    return NullType
+                return self._field_type(sym.type, attr, ctx)
+
         return self.visitChildren(ctx)
