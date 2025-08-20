@@ -467,25 +467,50 @@ class SemanticAnalyzer(CompiscriptVisitor):
 
     # ================= Llamadas (funciones y métodos) =================
     def visitCallExpr(self, ctx: CompiscriptParser.CallExprContext):
-        callee_text = ctx.parentCtx.primaryAtom().getText()
+        # 1) Intentar obtener el texto completo "callee(arg1,...)" desde el PADRE.
+        call_text = ""
+        try:
+            if hasattr(ctx, "parentCtx") and hasattr(ctx.parentCtx, "getText"):
+                call_text = ctx.parentCtx.getText() or ""
+            else:
+                call_text = ctx.getText() or ""
+        except Exception:
+            call_text = ctx.getText() or ""
 
-        # ---- Caso método: obj.metodo(...) ----
+        # 2) Extraer la parte antes del primer '('  -> el callee textual.
+        callee_text = call_text.split("(", 1)[0].strip()
+
+        # 3) Último recurso: usa primaryAtom del padre (lo que tenías antes).
+        if not callee_text:
+            try:
+                callee_text = ctx.parentCtx.primaryAtom().getText().strip()
+            except Exception:
+                pass
+
+        # Si aún no hay callee, no podemos tipar la llamada.
+        if not callee_text:
+            self._add_error("No se pudo resolver el callee de la llamada.", ctx)
+            return NullType
+
+        # ====== Resolución del callee ======
+        # Caso método: obj.metodo(...)
         if "." in callee_text:
             recv_name, meth_name = callee_text.split(".", 1)
 
-            # tipo del receptor
+            # Tipo del receptor
             if recv_name == "this":
                 if not self.current_class:
                     self._add_error("'this' usado fuera de una clase.", ctx)
                     return NullType
                 recv_type = self.current_class
             else:
-                sym = self.current_scope.lookup(recv_name)
-                if sym is None:
-                    self._add_error(f"'{recv_name}' no ha sido declarado.", ctx.parentCtx.primaryAtom())
+                recv_sym = self.current_scope.lookup(recv_name)
+                if recv_sym is None:
+                    self._add_error(f"'{recv_name}' no ha sido declarado.", ctx)
                     return NullType
-                recv_type = sym.type
+                recv_type = recv_sym.type
 
+            from custom_types import ClassType, FunctionType, IntType, FloatType, NullType  # por seguridad de nombres
             if not isinstance(recv_type, ClassType):
                 self._add_error(f"No se puede llamar '{meth_name}' sobre tipo '{recv_type}'.", ctx)
                 return NullType
@@ -493,18 +518,18 @@ class SemanticAnalyzer(CompiscriptVisitor):
             func_type = self._method_type(recv_type, meth_name, ctx)
 
         else:
-            # ---- Función libre id(...) ----
-            callee_name = callee_text
-            symbol = self.current_scope.lookup(callee_name)
+            # Función global: id(...)
+            symbol = self.current_scope.lookup(callee_text)
             if symbol is None:
-                self._add_error(f"Función '{callee_name}' no ha sido declarada.", ctx.parentCtx.primaryAtom())
+                self._add_error(f"Función '{callee_text}' no ha sido declarada.", ctx)
                 return NullType
+            from custom_types import FunctionType
             if not isinstance(symbol.type, FunctionType):
-                self._add_error(f"'{callee_name}' no es una función y no se puede llamar.", ctx.parentCtx.primaryAtom())
+                self._add_error(f"'{callee_text}' no es una función y no se puede llamar.", ctx)
                 return NullType
             func_type = symbol.type
 
-        # Chequeo de argumentos (igual que ya tenías)
+        # ====== Chequeo de argumentos ======
         arg_expressions = ctx.arguments().expression() if ctx.arguments() else []
         if len(func_type.param_types) != len(arg_expressions):
             self._add_error(
@@ -513,6 +538,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
             )
             return func_type.return_type
 
+        from custom_types import IntType, FloatType
         for i, arg_expr in enumerate(arg_expressions):
             arg_type = self.visit(arg_expr)
             expected_type = func_type.param_types[i]
@@ -522,7 +548,9 @@ class SemanticAnalyzer(CompiscriptVisitor):
                     f"Se esperaba '{expected_type}', pero se obtuvo '{arg_type}'.",
                     arg_expr
                 )
+
         return func_type.return_type
+
 
     # ================= Pasarelas genéricas =================
     def visitExpression(self, ctx: CompiscriptParser.ExpressionContext):
