@@ -5,7 +5,7 @@ from scripts.CompiscriptVisitor import CompiscriptVisitor
 
 from custom_types import (
     IntType, FloatType, BoolType, StringType, NullType, VoidType,
-    FunctionType, ClassType   # <<< AÑADIDO ClassType
+    FunctionType, ClassType, ArrayType
 )
 from symbol_table import SymbolTable
 
@@ -18,11 +18,11 @@ class SemanticAnalyzer(CompiscriptVisitor):
         self.errors = []
         self.current_function_return_type = None
 
-        # <<< AÑADIDO: estado para clases >>>
+        # ---- Estado para clases ----
         self.classes = {}          # "Persona" -> ClassType
         self.current_class = None  # ClassType o None
         self.in_class_body = False
-        self.in_function = False   # para distinguir campos vs variables locales
+        self.in_function = False   # distinguir campos vs variables locales
 
         # ---- Árbol de símbolos para el IDE ----
         self._sym_root = {
@@ -73,7 +73,9 @@ class SemanticAnalyzer(CompiscriptVisitor):
         if t is StringType: return "string"
         if t is NullType: return "null"
         if t is VoidType: return "void"
-        if isinstance(t, ClassType):  # <<< nombre legible para clases
+        if isinstance(t, ArrayType):
+            return f"{self._tname(t.elem_type)}[]"
+        if isinstance(t, ClassType):
             return t.name
         if isinstance(t, FunctionType):
             args = ", ".join(self._tname(p) for p in t.param_types)
@@ -83,11 +85,104 @@ class SemanticAnalyzer(CompiscriptVisitor):
     def symbol_tree(self):
         return self._sym_root
 
-    # ===== Helpers de clases =====
+    # ===== Helpers de tipos / clases =====
     def _resolve_type_token(self, name: str):
-        """Resuelve nombre de tipo ('integer', 'Persona', etc.)"""
-        prim = {"integer": IntType, "float": FloatType, "boolean": BoolType, "string": StringType, "void": VoidType}
+        """Resuelve nombre de tipo ('integer', 'Persona', etc.)."""
+        prim = {
+            "integer": IntType,
+            "float": FloatType,
+            "boolean": BoolType,
+            "string": StringType,
+            "void": VoidType
+        }
         return prim.get(name) or self.classes.get(name)
+
+    def _parse_type_text(self, text: str):
+        """'integer', 'string[]', 'Persona[][]' -> Type/ArrayType."""
+        raw = (text or "").replace(" ", "")
+        dims = 0
+        while raw.endswith("[]"):
+            dims += 1
+            raw = raw[:-2]
+        base = self._resolve_type_token(raw)
+        t = base
+        for _ in range(dims):
+            t = ArrayType(t)
+        return t
+
+    def _compatible(self, expected, actual):
+        """Compatibilidad básica (incluye int->float y arrays)."""
+        if expected == actual:
+            return True
+        # numérico: int -> float
+        if expected == FloatType and actual == IntType:
+            return True
+        # arrays
+        if isinstance(expected, ArrayType) and isinstance(actual, ArrayType):
+            # permitir [] vacío (elem_type == NullType) como cualquier T[]
+            if actual.elem_type == NullType:
+                return True
+            return self._compatible(expected.elem_type, actual.elem_type)
+        return False
+
+    def _infer_array_literal_type_from_text(self, txt: str):
+        """Inferir tipo de literal de array: [], [1,2], [[1],[2]], etc."""
+        s = (txt or "").strip()
+        if not (s.startswith("[") and s.endswith("]")):
+            return NullType
+        inner = s[1:-1].strip()
+        if inner == "":
+            return ArrayType(NullType)  # array vacío
+
+        # split por comas a nivel superior (soporta anidados y strings)
+        parts, buf, depth, in_str = [], [], 0, False
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch == '"' and (i == 0 or inner[i-1] != "\\"):
+                in_str = not in_str
+                buf.append(ch)
+            elif not in_str and ch == '[':
+                depth += 1; buf.append(ch)
+            elif not in_str and ch == ']':
+                depth -= 1; buf.append(ch)
+            elif not in_str and depth == 0 and ch == ',':
+                parts.append("".join(buf).strip()); buf = []
+            else:
+                buf.append(ch)
+            i += 1
+        if buf: parts.append("".join(buf).strip())
+
+        # tipo por elemento
+        elem_types = []
+        for p in parts:
+            if p.startswith("["):
+                elem_types.append(self._infer_array_literal_type_from_text(p))
+            elif p.startswith('"'):
+                elem_types.append(StringType)
+            elif p in ("true", "false"):
+                elem_types.append(BoolType)
+            elif p == "null":
+                elem_types.append(NullType)
+            else:
+                if "." in p:
+                    try:
+                        float(p); elem_types.append(FloatType)
+                    except:
+                        elem_types.append(NullType)
+                else:
+                    num = p.lstrip("-")
+                    elem_types.append(IntType if num.isdigit() else NullType)
+
+        et = elem_types[0]
+        for t in elem_types[1:]:
+            if et == t:
+                continue
+            if (et in (IntType, FloatType)) and (t in (IntType, FloatType)):
+                et = FloatType
+            else:
+                et = NullType; break
+        return ArrayType(et)
 
     def _field_type(self, ctype: ClassType, field: str, ctx):
         t = ctype
@@ -120,8 +215,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
         self._pop_scope()
 
     # ================= CLASES =================
-    # Nota: asumo regla 'ClassDeclaration'; si tu regla se llama distinto,
-    # cambia el nombre del método al que corresponda.
     def visitClassDeclaration(self, ctx: CompiscriptParser.ClassDeclarationContext):
         # class Nombre [: Base]? { ... }
         name = None
@@ -134,9 +227,8 @@ class SemanticAnalyzer(CompiscriptVisitor):
                 if base is None:
                     self._add_error(f"Clase base '{base_name}' no ha sido declarada.", ctx)
         except Exception:
-            # Fallback por si la API del contexto difiere
+            # fallback si difiere la API del contexto
             text = ctx.getText()
-            # classNombre{...} o classNombre:Base{...}
             try:
                 header = text.split("{", 1)[0]
                 header = header.replace("class", "", 1)
@@ -154,7 +246,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
             ctype = ClassType(name, base)
             self.classes[name] = ctype
         else:
-            # si ya existía, actualiza base si procede
             if base and ctype.base is None:
                 ctype.base = base
 
@@ -163,7 +254,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
         self.in_class_body = True
 
         self._push_scope(f"class {name}", ctx)
-        self.visitChildren(ctx)  # aquí caerán let/func members y se registran abajo
+        self.visitChildren(ctx)  # dentro registramos campos/métodos
         self._pop_scope()
 
         self.current_class = prev_cls
@@ -179,6 +270,8 @@ class SemanticAnalyzer(CompiscriptVisitor):
             return StringType
         if text == 'null':
             return NullType
+        if text.startswith('[') and text.endswith(']'):
+            return self._infer_array_literal_type_from_text(text)
         if ctx.Literal():
             literal_text = ctx.Literal().getText()
             if '.' in literal_text:
@@ -189,7 +282,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
 
     def visitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
         name = ctx.getText()
-        if name == "this":  # <<< soporte de 'this'
+        if name == "this":
             if self.current_class:
                 return self.current_class
             self._add_error("'this' usado fuera de una clase.", ctx)
@@ -206,17 +299,16 @@ class SemanticAnalyzer(CompiscriptVisitor):
         declared_type = None
         line, col = ctx.start.line, ctx.start.column
 
-        # tipo explícito (primitivo o clase)
+        # tipo explícito (primitivo / clase / array)
         if ctx.typeAnnotation():
-            declared_type_str = ctx.typeAnnotation().type_().baseType().getText()
-            declared_type = self._resolve_type_token(declared_type_str)
+            ttxt = ctx.typeAnnotation().type_().getText()
+            declared_type = self._parse_type_text(ttxt)
 
         # CAMPO DE CLASE: let campo: T;  (no insertar en tabla global)
         if self.in_class_body and not self.in_function:
             if declared_type is None:
                 self._add_error(f"No se pudo determinar el tipo del campo '{var_name}'.", ctx)
                 return
-            # registra campo en la clase actual
             self.current_class.fields[var_name] = declared_type
             self._record_symbol(var_name, declared_type, False, line, col)
             return
@@ -227,7 +319,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
             expr_type = self.visit(ctx.initializer().expression())
             if declared_type is None:
                 declared_type = expr_type
-            elif expr_type and expr_type != declared_type and not (declared_type == FloatType and expr_type == IntType):
+            elif expr_type and not self._compatible(declared_type, expr_type):
                 self._add_error(
                     f"No se puede asignar tipo '{expr_type}' a variable de tipo '{declared_type}'.", ctx
                 )
@@ -255,8 +347,8 @@ class SemanticAnalyzer(CompiscriptVisitor):
                 f"La constante '{const_name}' debe tener una anotación de tipo explícita.", ctx
             ); return
 
-        declared_type_str = ctx.typeAnnotation().type_().baseType().getText()
-        declared_type = self._resolve_type_token(declared_type_str)
+        ttxt = ctx.typeAnnotation().type_().getText()
+        declared_type = self._parse_type_text(ttxt)
 
         if not self.current_scope.insert(const_name, declared_type, is_const=True, line=line, col=col):
             self._add_error(f"Identificador '{const_name}' ya declarado.", ctx); return
@@ -264,7 +356,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
             self._record_symbol(const_name, declared_type, True, line, col)
 
         expr_type = self.visit(ctx.expression())
-        if expr_type and expr_type != declared_type and not (declared_type == FloatType and expr_type == IntType):
+        if expr_type and not self._compatible(declared_type, expr_type):
             self._add_error(
                 f"Tipo incompatible para constante '{const_name}'. Se esperaba '{declared_type}' pero se obtuvo '{expr_type}'.",
                 ctx
@@ -273,43 +365,37 @@ class SemanticAnalyzer(CompiscriptVisitor):
     # ===== Funciones y MÉTODOS =====
     def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
         func_name = ctx.Identifier().getText()
-        # tipos primitivos + void + clases
+
         return_type = VoidType
         if ctx.type_():
-            return_type_str = ctx.type_().baseType().getText()
-            return_type = self._resolve_type_token(return_type_str) or VoidType
+            return_type = self._parse_type_text(ctx.type_().getText()) or VoidType
 
         param_types = []
         if ctx.parameters():
             for pctx in ctx.parameters().parameter():
-                p = pctx.type_().baseType().getText()
-                param_types.append(self._resolve_type_token(p))
+                param_types.append(self._parse_type_text(pctx.type_().getText()))
 
         func_type = FunctionType(return_type, param_types)
 
-        # ---- Caso método dentro de clase ----
+        # ---- Método en clase ----
         if self.in_class_body and not self.in_function:
-            # Registrar método en la clase (no contaminar el global)
             if func_name in self.current_class.methods:
                 self._add_error(f"Método '{func_name}' ya ha sido declarado en esta clase.", ctx)
             else:
                 self.current_class.methods[func_name] = func_type
                 self._record_symbol(func_name, func_type, False, ctx.start.line, ctx.start.column)
 
-            # Entrar al scope del método
             prev_ret = self.current_function_return_type
             prev_in_func = self.in_function
             self.current_function_return_type = return_type
             self.in_function = True
 
             self._push_scope(f"method {func_name}", ctx)
-            # (Opcional) insertar 'this' en el scope
             try:
                 self.current_scope.insert("this", self.current_class, line=ctx.start.line, col=ctx.start.column)
             except Exception:
                 pass
 
-            # Parámetros
             if ctx.parameters():
                 for i, pctx in enumerate(ctx.parameters().parameter()):
                     pname = pctx.Identifier().getText()
@@ -317,7 +403,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
                     self.current_scope.insert(pname, ptype, line=pctx.start.line, col=pctx.start.column)
                     self._record_symbol(pname, ptype, False, pctx.start.line, pctx.start.column)
 
-            # Cuerpo
             self.visit(ctx.block())
 
             self._pop_scope()
@@ -325,7 +410,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
             self.current_function_return_type = prev_ret
             return
 
-        # ---- Función global normal (tu lógica original) ----
+        # ---- Función global ----
         if not self.current_scope.insert(func_name, func_type, line=ctx.start.line, col=ctx.start.column):
             self._add_error(f"Función o variable '{func_name}' ya ha sido declarada en este ámbito.", ctx)
         else:
@@ -467,7 +552,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
 
     # ================= Llamadas (funciones y métodos) =================
     def visitCallExpr(self, ctx: CompiscriptParser.CallExprContext):
-        # 1) Intentar obtener el texto completo "callee(arg1,...)" desde el PADRE.
+        # 1) Texto completo de la llamada desde el PADRE.
         call_text = ""
         try:
             if hasattr(ctx, "parentCtx") and hasattr(ctx.parentCtx, "getText"):
@@ -477,27 +562,24 @@ class SemanticAnalyzer(CompiscriptVisitor):
         except Exception:
             call_text = ctx.getText() or ""
 
-        # 2) Extraer la parte antes del primer '('  -> el callee textual.
+        # 2) Callee textual (antes del primer '(').
         callee_text = call_text.split("(", 1)[0].strip()
 
-        # 3) Último recurso: usa primaryAtom del padre (lo que tenías antes).
+        # 3) Último recurso
         if not callee_text:
             try:
                 callee_text = ctx.parentCtx.primaryAtom().getText().strip()
             except Exception:
                 pass
 
-        # Si aún no hay callee, no podemos tipar la llamada.
         if not callee_text:
             self._add_error("No se pudo resolver el callee de la llamada.", ctx)
             return NullType
 
-        # ====== Resolución del callee ======
-        # Caso método: obj.metodo(...)
+        # ---- Método: obj.metodo(...) ----
         if "." in callee_text:
             recv_name, meth_name = callee_text.split(".", 1)
 
-            # Tipo del receptor
             if recv_name == "this":
                 if not self.current_class:
                     self._add_error("'this' usado fuera de una clase.", ctx)
@@ -510,7 +592,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
                     return NullType
                 recv_type = recv_sym.type
 
-            from custom_types import ClassType, FunctionType, IntType, FloatType, NullType  # por seguridad de nombres
             if not isinstance(recv_type, ClassType):
                 self._add_error(f"No se puede llamar '{meth_name}' sobre tipo '{recv_type}'.", ctx)
                 return NullType
@@ -518,18 +599,17 @@ class SemanticAnalyzer(CompiscriptVisitor):
             func_type = self._method_type(recv_type, meth_name, ctx)
 
         else:
-            # Función global: id(...)
+            # ---- Función global id(...) ----
             symbol = self.current_scope.lookup(callee_text)
             if symbol is None:
                 self._add_error(f"Función '{callee_text}' no ha sido declarada.", ctx)
                 return NullType
-            from custom_types import FunctionType
             if not isinstance(symbol.type, FunctionType):
                 self._add_error(f"'{callee_text}' no es una función y no se puede llamar.", ctx)
                 return NullType
             func_type = symbol.type
 
-        # ====== Chequeo de argumentos ======
+        # ---- Chequeo de argumentos ----
         arg_expressions = ctx.arguments().expression() if ctx.arguments() else []
         if len(func_type.param_types) != len(arg_expressions):
             self._add_error(
@@ -538,7 +618,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
             )
             return func_type.return_type
 
-        from custom_types import IntType, FloatType
         for i, arg_expr in enumerate(arg_expressions):
             arg_type = self.visit(arg_expr)
             expected_type = func_type.param_types[i]
@@ -551,7 +630,6 @@ class SemanticAnalyzer(CompiscriptVisitor):
 
         return func_type.return_type
 
-
     # ================= Pasarelas genéricas =================
     def visitExpression(self, ctx: CompiscriptParser.ExpressionContext):
         return self.visitChildren(ctx)
@@ -561,7 +639,7 @@ class SemanticAnalyzer(CompiscriptVisitor):
         if ctx.getChildCount() == 3 and ctx.getChild(0).getText() == '(':
             return self.visit(ctx.expression())
 
-        # <<< NEW: new Clase(...) devuelve ClassType (sin chequear ctor aquí) >>>
+        # new Clase(...)
         try:
             if ctx.getChildCount() >= 2 and ctx.getChild(0).getText() == 'new':
                 cname = ctx.getChild(1).getText()
@@ -573,9 +651,14 @@ class SemanticAnalyzer(CompiscriptVisitor):
         except Exception:
             pass
 
-        # <<< NEW: acceso a campo simple: this.x o id.x (no es llamada) >>>
         txt = ctx.getText()
-        if "." in txt and "(" not in txt:
+
+        # literal de array
+        if txt.startswith("[") and txt.endswith("]"):
+            return self._infer_array_literal_type_from_text(txt)
+
+        # acceso a campo simple: this.x o id.x (no es llamada)
+        if "." in txt and "(" not in txt and "[" not in txt:
             base, attr = txt.split(".", 1)
             if base == "this":
                 if not self.current_class:
@@ -591,5 +674,30 @@ class SemanticAnalyzer(CompiscriptVisitor):
                     self._add_error(f"No se puede acceder a '.{attr}' sobre tipo '{sym.type}'.", ctx)
                     return NullType
                 return self._field_type(sym.type, attr, ctx)
+
+        # indexación: id[expr]  -> tipo del elemento (soporta arrays anidados)
+        if "[" in txt and txt.endswith("]") and not txt.startswith("[") and "(" not in txt:
+            base = txt.split("[", 1)[0]
+            index_text = txt[txt.find("[")+1:-1].strip()
+
+            sym = self.current_scope.lookup(base)
+            if sym is None:
+                self._add_error(f"'{base}' no ha sido declarado.", ctx)
+                return NullType
+            arr_t = sym.type
+            if not isinstance(arr_t, ArrayType):
+                self._add_error(f"No se puede indexar sobre tipo '{arr_t}'.", ctx)
+                return NullType
+
+            # tipo del índice
+            if index_text.lstrip("-").isdigit():
+                idx_t = IntType
+            else:
+                s = self.current_scope.lookup(index_text)
+                idx_t = s.type if s else NullType
+            if idx_t != IntType:
+                self._add_error(f"El índice de un array debe ser integer, se obtuvo '{idx_t}'.", ctx)
+
+            return arr_t.elem_type
 
         return self.visitChildren(ctx)

@@ -41,6 +41,18 @@ class ClassType(Type):
     return self.name
 
 
+# ===== Tipo de Array =====
+class ArrayType(Type):
+  def __init__(self, elem_type):
+    self.elem_type = elem_type
+
+  def __str__(self):
+    return f"{self.elem_type}[]"
+
+  def __eq__(self, other):
+    return isinstance(other, ArrayType) and self.elem_type == other.elem_type
+
+
 # ===== Instancias únicas para primitivos =====
 IntType    = _IntType()
 FloatType  = _FloatType()
