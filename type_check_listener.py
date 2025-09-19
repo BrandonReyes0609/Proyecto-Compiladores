@@ -1,4 +1,3 @@
-# archivo nuevo
 from SimpleLangListener import SimpleLangListener
 from SimpleLangParser import SimpleLangParser
 from custom_types import IntType, FloatType, StringType, BoolType
