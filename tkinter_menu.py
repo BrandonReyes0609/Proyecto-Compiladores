@@ -12,7 +12,8 @@ from contextlib import redirect_stdout, redirect_stderr
 # IMPORTA la API del Driver dentro de /program
 from program.Driver import parse_code_from_string
 
-# Para generar TAC
+# Para genera
+# r TAC
 from program.TACGeneratorVisitor import TACGeneratorVisitor
 from scripts.CompiscriptLexer import CompiscriptLexer
 from scripts.CompiscriptParser import CompiscriptParser
@@ -480,6 +481,9 @@ class CompiscriptIDE(tk.Tk):
 
             # Mostrar TAC en la pestaña Código Intermedio
             self._set_text(self.txt_ir, tac_code)
+
+            # ✅ Señal visual de que el TAC se generó bien
+            self._msg("🔹 TAC generado correctamente.\n")
         except Exception as e:
             self._msg(f"⚠️ Error generando TAC: {e}\n")
 
