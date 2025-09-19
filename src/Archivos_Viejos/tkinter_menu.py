@@ -443,8 +443,8 @@ class CompiscriptIDE(tk.Tk):
             actions = result.get("actions", "") or ""
             ir = result.get("ir", "") or ""
             asm = result.get("asm", "") or ""
-            errors = result.get("errors")
-            if errors is None:
+            errors = result.get("errors")              # puede ser [], y eso ya significa “sin errores”
+            if errors is None:                         # sólo si la clave no viene, inferimos desde texto
                 errors = self._infer_errors(messages)
             timings = result.get("timings") or {}
             symbols = result.get("symbols")
@@ -466,23 +466,6 @@ class CompiscriptIDE(tk.Tk):
         self._apply_squiggles(errors)
         self._set_symbols(symbols)
 
-        # ===== Generar TAC con el Visitor =====
-        try:
-            input_stream = InputStream(src)
-            lexer = CompiscriptLexer(input_stream)
-            token_stream = CommonTokenStream(lexer)
-            parser = CompiscriptParser(token_stream)
-            tree_ir = parser.program()
-
-            visitor = TACGeneratorVisitor()
-            visitor.visit(tree_ir)
-            tac_code = visitor.get_code()
-
-            # Mostrar TAC en la pestaña Código Intermedio
-            self._set_text(self.txt_ir, tac_code)
-        except Exception as e:
-            self._msg(f"⚠️ Error generando TAC: {e}\n")
-
         # Timings al final de mensajes
         if timings:
             parts = []
@@ -498,7 +481,7 @@ class CompiscriptIDE(tk.Tk):
         else:
             self._msg("✅ Compilación sin errores.\n")
 
-    # ===== Helpers =====
+    # ===== AST =====
     def _set_ast(self, s: str):
         self.tree_ast.delete(*self.tree_ast.get_children())
         txt = (s or "").strip()
@@ -537,10 +520,21 @@ class CompiscriptIDE(tk.Tk):
         except Exception:
             self.tree_ast.insert("", "end", text=(txt[:120] + ("…" if len(txt) > 120 else "")))
 
+    # ===== Símbolos =====
     def _set_symbols(self, symbols_tree: Any):
+        """Puebla la pestaña 'Símbolos'. Espera un dict jerárquico:
+           {
+             "scope": "global",
+             "symbols": [{"name":..., "type":..., "const":bool, "line":int?, "col":int?}, ...],
+             "children": [ <subscopes> ]
+           }
+           Si es None, muestra (sin datos).
+        """
         self.tree_sym.delete(*self.tree_sym.get_children())
+
         if not symbols_tree:
-            self.tree_sym.insert("", "end", values=("—", "(sin datos)", "", "", "", ""))
+            self.tree_sym.insert("", "end",
+                                 values=("—", "(sin datos)", "", "", "", ""))
             return
 
         def to_str(v):
@@ -552,6 +546,7 @@ class CompiscriptIDE(tk.Tk):
         rows: List[tuple] = []
 
         def walk(scope_node, scope_name: str):
+            # Cargar símbolos de este scope
             for sym in (scope_node.get("symbols") or []):
                 rows.append((
                     scope_name,
@@ -561,6 +556,7 @@ class CompiscriptIDE(tk.Tk):
                     sym.get("line", ""),
                     sym.get("col", ""),
                 ))
+            # Recurse sub-scopes
             for child in (scope_node.get("children") or []):
                 child_name = to_str(child.get("scope") or f"{scope_name}::anon")
                 walk(child, child_name)
@@ -569,7 +565,8 @@ class CompiscriptIDE(tk.Tk):
         walk(symbols_tree, root_name)
 
         if not rows:
-            self.tree_sym.insert("", "end", values=(root_name, "(sin símbolos)", "", "", "", ""))
+            self.tree_sym.insert("", "end",
+                                 values=(root_name, "(sin símbolos)", "", "", "", ""))
             return
 
         for r in rows:
@@ -586,6 +583,7 @@ class CompiscriptIDE(tk.Tk):
         except Exception:
             pass
 
+    # ===== Problemas / Squiggles =====
     def _set_problems(self, items: List[Dict[str, Any]]):
         self.problems.delete(*self.problems.get_children())
         for it in items or []:
@@ -625,13 +623,14 @@ class CompiscriptIDE(tk.Tk):
             except Exception:
                 pass
 
+    # ===== Helpers =====
     def _infer_errors(self, text: str) -> List[Dict[str, Any]]:
         if not text:
             return []
         out: List[Dict[str, Any]] = []
         pats = [
-            r"^line\\s+(?P<line>\\d+)\\s*[: ,]\\s*(?P<col>\\d+)\\s*(?P<msg>.*)$",
-            r"^[Ll]í?nea\\s+(?P<line>\\d+)\\s*,?\\s*[Cc](?:ol(?:\\.|umna)?)?\\s*(?P<col>\\d+)\\s*[:\\-]?\\s*(?P<msg>.*)$",
+            r"^line\s+(?P<line>\d+)\s*[: ,]\s*(?P<col>\d+)\s*(?P<msg>.*)$",
+            r"^[Ll]í?nea\s+(?P<line>\d+)\s*,?\s*[Cc](?:ol(?:\.|umna)?)?\s*(?P<col>\d+)\s*[:\-]?\s*(?P<msg>.*)$",
             r"^(?P<msg>mismatched input .+? expecting .+)$",
             r"^(?P<msg>no viable alternative at input .+)$",
             r"^(?P<msg>missing .+ at .+)$",
@@ -663,7 +662,7 @@ class CompiscriptIDE(tk.Tk):
                     break
             lower = line.lower()
             if (not matched and (("error" in lower) or ("missing" in lower))
-                and not re.search(r"\\b(?:sin|no)\\s+error(?:es)?\\b", lower)):
+                and not re.search(r"\b(?:sin|no)\s+error(?:es)?\b", lower)):
                 out.append({"sev": "error", "line": None, "col": None, "msg": line})
         return out
 
