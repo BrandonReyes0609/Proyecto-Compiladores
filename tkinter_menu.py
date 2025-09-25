@@ -457,7 +457,7 @@ class CompiscriptIDE(tk.Tk):
             timings = {}
             symbols = None
 
-        # Poblar UI
+        # Poblar UI con lo que devolvió el Driver
         self._set_ast(tree or "(sin árbol)")
         self._set_text(self.txt_msg, messages or "")
         self._set_text(self.txt_acc, actions or "")
@@ -467,25 +467,36 @@ class CompiscriptIDE(tk.Tk):
         self._apply_squiggles(errors)
         self._set_symbols(symbols)
 
-        # ===== Generar TAC con el Visitor =====
+        # ===== Análisis semántico + generación de TAC =====
         try:
+            from program.semantic_analyzer import SemanticAnalyzer
+            from program.symbol_table import SymbolTable
+
             input_stream = InputStream(src)
             lexer = CompiscriptLexer(input_stream)
             token_stream = CommonTokenStream(lexer)
             parser = CompiscriptParser(token_stream)
             tree_ir = parser.program()
 
+            # 1) Analizador semántico para poblar la tabla de símbolos
+            analyzer = SemanticAnalyzer()
+            analyzer.visit(tree_ir)
+            sym_tree = analyzer.symbol_tree()
+            self._set_symbols(sym_tree)
+
+            # 2) Generador TAC
             visitor = TACGeneratorVisitor()
             visitor.visit(tree_ir)
             tac_code = visitor.get_code()
-
-            # Mostrar TAC en la pestaña Código Intermedio
             self._set_text(self.txt_ir, tac_code)
 
-            # ✅ Señal visual de que el TAC se generó bien
+            # 3) Exportar tabla de símbolos extendida a JSON
+            SymbolTable().export_json("symbol_table.json")
+            self._msg("📦 Tabla de símbolos exportada a symbol_table.json\n")
+
             self._msg("🔹 TAC generado correctamente.\n")
         except Exception as e:
-            self._msg(f"⚠️ Error generando TAC: {e}\n")
+            self._msg(f"⚠️ Error en análisis semántico o TAC: {e}\n")
 
         # Timings al final de mensajes
         if timings:
@@ -501,6 +512,7 @@ class CompiscriptIDE(tk.Tk):
             self.tabs.select(self.problems)
         else:
             self._msg("✅ Compilación sin errores.\n")
+
 
     # ===== Helpers =====
     def _set_ast(self, s: str):
