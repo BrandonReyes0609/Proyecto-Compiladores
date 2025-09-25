@@ -32,6 +32,11 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         self.code: List[str] = []
         self.temp_count: int = 0
         self.label_count: int = 0
+        self.break_stack: List[str] = []
+        self.continue_stack: List[str] = []
+        self.current_function: Optional[str] = None
+        self.return_seen: bool = False
+
 
     def emit(self, line: str) -> None:
         self.code.append(line)
@@ -362,3 +367,130 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         return node.getText()
 
 
+    # =========================================================
+    # Persona 3: Control de flujo
+    # =========================================================
+    def visitIfStatement(self, ctx):
+        cond = self.visit(ctx.expression())
+        l_else = self.new_label()
+        l_end = self.new_label()
+
+        # condición falsa salta a else
+        self.emit(f"if {cond} == 0 goto {l_else}")
+        self.visit(ctx.block(0))
+
+        # si hay else
+        if ctx.block(1):
+            self.emit(f"goto {l_end}")
+            self.emit(f"{l_else}:")
+            self.visit(ctx.block(1))
+            self.emit(f"{l_end}:")
+        else:
+            self.emit(f"{l_else}:")
+
+
+    def visitDoWhileStatement(self, ctx):
+        l_begin = self.new_label()
+        self.emit(f"{l_begin}:")
+        self.visit(ctx.block())
+        cond = self.visit(ctx.expression())
+        self.emit(f"if {cond} != 0 goto {l_begin}")
+
+
+    def visitForStatement(self, ctx):
+        # inicialización
+        if ctx.variableDeclaration():
+            self.visit(ctx.variableDeclaration())
+        elif ctx.assignment():
+            self.visit(ctx.assignment())
+
+        l_begin = self.new_label()
+        l_end = self.new_label()
+
+        self.emit(f"{l_begin}:")
+        if ctx.expression(0):  # condición
+            cond = self.visit(ctx.expression(0))
+            self.emit(f"if {cond} == 0 goto {l_end}")
+
+        self.visit(ctx.block())
+
+        if ctx.expression(1):  # incremento
+            self.visit(ctx.expression(1))
+
+        self.emit(f"goto {l_begin}")
+        self.emit(f"{l_end}:")
+
+
+    def visitBreakStatement(self, ctx):
+        if not self.break_stack:
+            return
+        self.emit(f"goto {self.break_stack[-1]}")
+
+    def visitContinueStatement(self, ctx):
+        if not self.continue_stack:
+            return
+        self.emit(f"goto {self.continue_stack[-1]}")
+
+
+    def visitWhileStatement(self, ctx):
+        l_begin = self.new_label()
+        l_end = self.new_label()
+        self.continue_stack.append(l_begin)
+        self.break_stack.append(l_end)
+
+        self.emit(f"{l_begin}:")
+        cond = self.visit(ctx.expression())
+        self.emit(f"if {cond} == 0 goto {l_end}")
+        self.visit(ctx.block())
+        self.emit(f"goto {l_begin}")
+        self.emit(f"{l_end}:")
+
+        self.continue_stack.pop()
+        self.break_stack.pop()
+
+
+    # =========================================================
+    # Persona 4
+    # =========================================================
+    def visitFunctionDeclaration(self, ctx):
+        fname = ctx.Identifier().getText()
+        self.current_function = fname
+        self.return_seen = False  # reiniciar flag en cada función
+        self.emit(f"func {fname}:")
+
+        if ctx.parameters():
+            for p in ctx.parameters().parameter():
+                pname = p.Identifier().getText()
+                self.emit(f"param {pname}")
+
+        # cuerpo
+        self.visit(ctx.block())
+
+        # si no hubo return explícito, lo agregamos
+        if not self.return_seen:
+            self.emit("return")
+
+        self.emit(f"endfunc {fname}")
+        self.current_function = None
+
+
+    def visitCallExpr(self, ctx):
+        fname = ctx.getChild(0).getText()
+        args = ctx.arguments().expression() if ctx.arguments() else []
+
+        for arg in args:
+            val = self.visit(arg)
+            self.emit(f"param {val}")
+
+        tmp = self.new_temp()
+        self.emit(f"{tmp} = call {fname}, {len(args)}")
+        return tmp
+
+
+    def visitReturnStatement(self, ctx):
+        self.return_seen = True
+        if ctx.expression():
+            val = self.visit(ctx.expression())
+            self.emit(f"return {val}")
+        else:
+            self.emit("return")
