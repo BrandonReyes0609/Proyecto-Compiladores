@@ -859,3 +859,65 @@ class TACGeneratorVisitor(CompiscriptVisitor):
             self.emit(f"return {val}")
         else:
             self.emit("return")
+
+
+    # =========================================================
+    # Funciones con anotación de frame/offsets
+    # =========================================================
+    def visitFunctionDeclaration(self, ctx):
+        fname = ctx.Identifier().getText()
+        self.current_function = fname
+        self.return_seen = False
+
+        self.emit(f"func {fname}")
+        self.emit(".frame FP")
+
+        # Acceder al scope de la función (su symbol_table hijo)
+        # Supongamos que guardás los scopes en un diccionario: self.scopes[fname]
+        func_scope = getattr(ctx, "scope", None)
+
+        if func_scope:
+            for sym in func_scope.symbols.values():
+                # Convención: offset >= 0 → parámetros, offset < 0 → locales
+                if sym.offset is not None:
+                    if sym.offset >= 0:
+                        self.emit(f".param {sym.name}, +{(sym.offset+1)*4}")  
+                    else:
+                        self.emit(f".local {sym.name}, {sym.offset*4}")
+
+        # Cuerpo
+        self.visit(ctx.block())
+        if not self.return_seen:
+            self.emit("return")
+
+        self.emit(f"endfunc {fname}")
+        self.current_function = None
+
+
+
+    # =========================================================
+    # Declaración de clases con anotación de campos
+    # =========================================================
+    def visitClassDecl(self, ctx):
+        try:
+            cname = ctx.Identifier().getText()
+        except Exception:
+            cname = "Class"
+
+        self.emit(f".class {cname}")
+
+        class_scope = getattr(ctx, "scope", None)
+        if class_scope:
+            for sym in class_scope.symbols.values():
+                if sym.offset is not None:
+                    self.emit(f".field {sym.name}, +{sym.offset*4}")
+
+        self.emit(".endclass")
+
+        prev = self.current_class
+        self.current_class = cname
+        for ch in ctx.children or []:
+            if hasattr(ch, "accept"):
+                self.visit(ch)
+        self.current_class = prev
+        return None
