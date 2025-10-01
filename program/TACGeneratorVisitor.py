@@ -789,29 +789,65 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         self.current_function = fname
         self.return_seen = False
 
-        if self.current_class:
+        # ¿Es método (estamos dentro de una clase)?
+        is_method = self.current_class is not None
+        if is_method:
             qual = f"{self.current_class}.{fname}"
             self.emit(f"method {qual}")
-            if ctx.parameters():
-                for p in ctx.parameters().parameter():
-                    pname = p.Identifier().getText()
-                    self.emit(f"param {pname}")
-            self.visit(ctx.block())
-            if not self.return_seen:
-                self.emit("return")
-            self.emit("endmethod")
         else:
             self.emit(f"func {fname}:")
-            if ctx.parameters():
-                for p in ctx.parameters().parameter():
-                    pname = p.Identifier().getText()
-                    self.emit(f"param {pname}")
-            self.visit(ctx.block())
-            if not self.return_seen:
-                self.emit("return")
+
+        # ----- parámetros “lógicos” (mantener formato previo)
+        if ctx.parameters():
+            for p in ctx.parameters().parameter():
+                pname = p.Identifier().getText()
+                self.emit(f"param {pname}")
+
+        # ======== NUEVO: .frame con base+desplazamiento ========
+        # Si el analizador semántico adjuntó un 'scope' con offsets de símbolos:
+        fn_scope = getattr(ctx, "scope", None)
+        if fn_scope and hasattr(fn_scope, "symbols"):
+            # Normalizamos a lista (ajusta si tu TS usa otra estructura)
+            try:
+                symbols = list(getattr(fn_scope, "symbols").values())
+            except Exception:
+                # por si fuera ya lista/dict-like
+                symbols = list(fn_scope.symbols) if hasattr(fn_scope, "symbols") else []
+
+            # Si tus offsets están en “slots/palabras”, pásalos a bytes (x4).
+            # Si ya están en bytes, elimina el '* 4'.
+            def off_bytes(sym):
+                off = getattr(sym, "offset", None)
+                return off * 4 if isinstance(off, int) else None
+
+            self.emit(".frame")
+            for s in symbols:
+                ob = off_bytes(s)
+                if ob is None:
+                    continue
+                tag = "param" if getattr(s, "is_param", False) else "local"
+                # Convención ilustrativa: params [bp+X], locals [bp-X].
+                # Aquí solo mostramos el desplazamiento con signo para propósitos de IC.
+                sign = "+" if ob >= 0 else "-"
+                self.emit(f".{tag} {getattr(s, 'name', 'sym')}, [bp{sign}{abs(ob)}]")
+            self.emit(".endframe")
+        # ======== FIN NUEVO ========
+
+        # Cuerpo de la función
+        self.visit(ctx.block())
+
+        # return implícito si no se vio ninguno
+        if not self.return_seen:
+            self.emit("return")
+
+        # Cierre
+        if is_method:
+            self.emit("endmethod")
+        else:
             self.emit(f"endfunc {fname}")
 
         self.current_function = None
+
 
     def visitCallExpr(self, ctx):
         full = ctx.getText()
