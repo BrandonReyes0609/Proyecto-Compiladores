@@ -5,13 +5,15 @@ Generación de Código Intermedio (TAC) para Compiscript.
 
 Incluye:
 - (1) Reutilización de temporales (pool LIFO + actualización in-place del acumulador).
-- (2) Expansión robusta de llamadas (funciones y métodos) aunque la gramática no dispare visitCallExpr.
+- (2) Reutilización de variables temporales vía peephole (elimina copias triviales tA=tB).
+- Expansión robusta de llamadas (funciones y métodos) aunque la gramática no dispare visitCallExpr.
 - Acceso a propiedades con getprop/setprop.
 - LHS estrictamente asignable (id, obj.prop, arr[i]).
 """
 
 import os
 import sys
+import re
 from typing import List, Optional, Sequence
 
 # Asegura importar los módulos generados por ANTLR desde la raíz del repo
@@ -70,8 +72,75 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         self.label_count += 1
         return f"L{self.label_count}"
 
+    # ---- Peephole (punto 2) ----
+    def _peephole_copy_coalesce(self, lines: List[str]) -> List[str]:
+        """
+        Elimina copias triviales: si hay 'tA = <RHS_simple>' y tA se usa una sola vez,
+        sustituye ese uso por <RHS_simple> y borra la línea.
+        - No toca definiciones de etiqueta 'Lx:' ni líneas vacías.
+        - RHS_simple = un solo token (t#, id, literal).
+        """
+        temp_pat = re.compile(r"\bt\d+\b")
+        assign_pat = re.compile(r"^\s*(t\d+)\s*=\s*([A-Za-z_]\w*|t\d+|\".*?\"|\'.*?\'|\d+(?:\.\d+)?)\s*$")
+
+        # 1) Cuenta de usos por temp (en todas las líneas)
+        use_count = {}
+        for ln in lines:
+            # ignora etiquetas
+            if ln.strip().endswith(":"):
+                continue
+            for tok in temp_pat.findall(ln):
+                use_count[tok] = use_count.get(tok, 0) + 1
+
+        # 2) Detecta copias triviales candidatas
+        to_delete = set()
+        replacements = {}  # tA -> RHS
+
+        for idx, ln in enumerate(lines):
+            if ln.strip().endswith(":") or not ln.strip():
+                continue
+            m = assign_pat.match(ln)
+            if not m:
+                continue
+            dst, rhs = m.group(1), m.group(2)
+            if dst == rhs:
+                # tA = tA => inútil
+                to_delete.add(idx)
+                continue
+
+            # Si el destino aparece exactamente 1 vez (esta misma línea),
+            # entonces la asignación no tiene consumidores: intentar inline del RHS.
+            # Nota: use_count incluye esta línea (la aparición de dst), así que 1 significa solo aquí.
+            if use_count.get(dst, 0) == 1:
+                # Reemplazar apariciones futuras de dst por rhs (no habrá, pero por seguridad)
+                replacements[dst] = rhs
+                to_delete.add(idx)
+
+        # 3) Aplica reemplazos de manera segura (token a token) solo en líneas posteriores
+        def replace_tokenwise(s: str, repl_map: dict) -> str:
+            if not repl_map:
+                return s
+            # Reemplazo por límites de palabra para t#
+            for k, v in repl_map.items():
+                s = re.sub(rf"\b{re.escape(k)}\b", v, s)
+            return s
+
+        new_lines: List[str] = []
+        for i, ln in enumerate(lines):
+            if i in to_delete:
+                continue
+            # No tocar etiquetas
+            if ln.strip().endswith(":"):
+                new_lines.append(ln)
+                continue
+            new_lines.append(replace_tokenwise(ln, replacements))
+
+        return new_lines
+
     def get_code(self) -> str:
-        return "\n".join(self.code)
+        # Ejecuta peephole antes de devolver
+        optimized = self._peephole_copy_coalesce(self.code)
+        return "\n".join(optimized)
 
     # =========================================================
     # Utilidades internas
@@ -182,13 +251,54 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         self.emit(f"{t} = call method {meth}, {len(vals)+1}")
         return t
 
+    def _split_args_text(self, inner: str) -> list[str]:
+        """
+        Divide 'a, b, c' en argumentos a nivel tope.
+        Respeta paréntesis y comillas para no partir dentro de ellos.
+        """
+        args, buf = [], []
+        depth = 0
+        in_str = None  # '"', "'" o None
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if in_str:
+                buf.append(ch)
+                if ch == in_str:
+                    in_str = None
+                elif ch == "\\" and i + 1 < len(inner):
+                    # escapa siguiente
+                    i += 1
+                    buf.append(inner[i])
+            else:
+                if ch in ("'", '"'):
+                    in_str = ch
+                    buf.append(ch)
+                elif ch == "(":
+                    depth += 1
+                    buf.append(ch)
+                elif ch == ")":
+                    depth = max(0, depth - 1)
+                    buf.append(ch)
+                elif ch == "," and depth == 0:
+                    arg = "".join(buf).strip()
+                    if arg:
+                        args.append(arg)
+                    buf = []
+                else:
+                    buf.append(ch)
+            i += 1
+        last = "".join(buf).strip()
+        if last:
+            args.append(last)
+        return args
+
+
     def _normalize_value_from_node(self, node, text_value: str) -> str:
         """
         Si text_value parece una llamada cruda ('foo(...)'),
-        conviértela a TAC con 'param/call'. Si no logramos obtener la
-        lista de argumentos desde el nodo, hacemos un fallback:
-        - Si hay un hijo en posición 1, lo visitamos como único arg.
-        - Si no, usamos el texto dentro de los paréntesis tal cual en un temp.
+        conviértela a TAC con 'param/call'. Intenta obtener args desde el nodo.
+        Si no hay nodos de args, hace fallback textual robusto (split por comas a nivel tope).
         """
         if not isinstance(text_value, str):
             return text_value
@@ -198,47 +308,48 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         callee = text_value.split("(", 1)[0]
         args_nodes = self._collect_args_from_ctx(node)
 
-        # Fallback: 1 arg desde el hijo #1 si existe
-        if not args_nodes:
-            try:
-                inner_node = node.getChild(1)
-                if hasattr(inner_node, "accept"):
-                    args_nodes = [inner_node]
-            except Exception:
-                args_nodes = []
+        # Camino normal con nodos de argumentos
+        if args_nodes:
+            if "." in callee:
+                recv, meth = callee.split(".", 1)
+                return self._emit_method_call(recv, meth, args_nodes)
+            return self._emit_function_call(callee, args_nodes)
 
-        # Si aún no hay args_nodes, usa el texto dentro de (...)
-        if not args_nodes:
-            try:
-                inner_text = text_value[text_value.find("(")+1:text_value.rfind(")")]
-            except Exception:
-                inner_text = ""
-            out = self.new_temp()
-            if inner_text.strip():
-                tmp_inner = self.new_temp()
-                self.emit(f"{tmp_inner} = {inner_text}")
-                self.emit(f"param {tmp_inner}")
-                if "." in callee:
-                    recv, meth = callee.split(".", 1)
-                    self.emit(f"param {recv}")
-                    self.emit(f"{out} = call method {meth}, 2")
-                else:
-                    self.emit(f"{out} = call {callee}, 1")
-                self.tm.free(tmp_inner)
-            else:
-                if "." in callee:
-                    recv, meth = callee.split(".", 1)
-                    self.emit(f"param {recv}")
-                    self.emit(f"{out} = call method {meth}, 1")
-                else:
-                    self.emit(f"{out} = call {callee}, 0")
-            return out
+        # --- Fallback textual: partir "a, b, c" a nivel tope y emitir params uno por uno ---
+        try:
+            inner_text = text_value[text_value.find("(")+1:text_value.rfind(")")]
+        except Exception:
+            inner_text = ""
 
-        # Camino normal con args_nodes
+        arg_texts = [a for a in self._split_args_text(inner_text) if a]
+
+        # Si es método: separar receptor y método
+        is_method = False
+        recv = meth = None
         if "." in callee:
             recv, meth = callee.split(".", 1)
-            return self._emit_method_call(recv, meth, args_nodes)
-        return self._emit_function_call(callee, args_nodes)
+            is_method = True
+
+        # 1) Emitir params de derecha a izquierda como hacemos en el camino normal
+        #    Materializamos cada arg textual en un temp para no romper semántica.
+        for a in reversed(arg_texts):
+            tmp = self.new_temp()
+            self.emit(f"{tmp} = {a}")
+            self.emit(f"param {tmp}")
+            self.tm.free(tmp)
+
+        # 2) Param 'this' si es método
+        if is_method:
+            self.emit(f"param {recv}")
+
+        # 3) Hacer la llamada con aridad correcta
+        out = self.new_temp()
+        argc = len(arg_texts) + (1 if is_method else 0)
+        if is_method:
+            self.emit(f"{out} = call method {meth}, {argc}")
+        else:
+            self.emit(f"{out} = call {callee}, {argc}")
+        return out
 
     # =========================================================
     # Plegado binario con optimización in-place y normalización de llamadas
