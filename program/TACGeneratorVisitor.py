@@ -856,47 +856,26 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         if ctx.expression():
             val = self.visit(ctx.expression())
             val = self._normalize_value_from_node(ctx.expression(), val)
+
+            # 🔹 Si es un temporal o un nombre de variable, retorna directo
+            if isinstance(val, str) and (val.startswith("t") or val.isidentifier()):
+                self.emit(f"return {val}")
+                return
+
+            # 🔹 Si es un literal crudo, materialízalo
+            if isinstance(val, str) and (val.startswith('"') or val.isdigit()):
+                tmp = self.new_temp()
+                self.emit(f"{tmp} = {val}")
+                self.emit(f"return {tmp}")
+                return
+
+            # 🔹 En cualquier otro caso
             self.emit(f"return {val}")
         else:
             self.emit("return")
 
-
     # =========================================================
-    # Funciones con anotación de frame/offsets
-    # =========================================================
-    def visitFunctionDeclaration(self, ctx):
-        fname = ctx.Identifier().getText()
-        self.current_function = fname
-        self.return_seen = False
-
-        self.emit(f"func {fname}")
-        self.emit(".frame FP")
-
-        # Acceder al scope de la función (su symbol_table hijo)
-        # Supongamos que guardás los scopes en un diccionario: self.scopes[fname]
-        func_scope = getattr(ctx, "scope", None)
-
-        if func_scope:
-            for sym in func_scope.symbols.values():
-                # Convención: offset >= 0 → parámetros, offset < 0 → locales
-                if sym.offset is not None:
-                    if sym.offset >= 0:
-                        self.emit(f".param {sym.name}, +{(sym.offset+1)*4}")  
-                    else:
-                        self.emit(f".local {sym.name}, {sym.offset*4}")
-
-        # Cuerpo
-        self.visit(ctx.block())
-        if not self.return_seen:
-            self.emit("return")
-
-        self.emit(f"endfunc {fname}")
-        self.current_function = None
-
-
-
-    # =========================================================
-    # Declaración de clases con anotación de campos
+    # Clases (.class/.field con offsets si hay TS)
     # =========================================================
     def visitClassDecl(self, ctx):
         try:
@@ -904,16 +883,26 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         except Exception:
             cname = "Class"
 
+        # Anotación de clase y (si hay) offsets de campos
         self.emit(f".class {cname}")
 
         class_scope = getattr(ctx, "scope", None)
         if class_scope:
+            # Si la TS trae offsets de campos, los ordenamos por offset
+            fields = []
             for sym in class_scope.symbols.values():
-                if sym.offset is not None:
-                    self.emit(f".field {sym.name}, +{sym.offset*4}")
+                off = getattr(sym, "offset", None)
+                # muchos analizadores asignan offsets >=0 a campos
+                if isinstance(off, int) and off >= 0:
+                    fields.append(sym)
+            if fields:
+                fields.sort(key=lambda s: s.offset)
+                for s in fields:
+                    self.emit(f".field {s.name}, +{s.offset*4}")
 
         self.emit(".endclass")
 
+        # Procesar miembros de la clase (métodos, etc.)
         prev = self.current_class
         self.current_class = cname
         for ch in ctx.children or []:
