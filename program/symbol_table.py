@@ -1,13 +1,16 @@
 # program/symbol_table.py
 import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 
-# Tipos mínimos (evita dependencia a custom_types)
 class Type:
     def __init__(self, name: str):
         self.name = name
     def __str__(self): return self.name
     def __repr__(self): return self.name
+
+# Exponemos un "constructor" de tipos por nombre para reutilizar
+def TYPE(name: str) -> Type:
+    return Type(name)
 
 INT    = Type("integer")
 STR    = Type("string")
@@ -17,7 +20,6 @@ CLASS  = lambda n: Type(f"class<{n}>")
 FN     = lambda sig: Type(sig)  # ej: "fn(integer)->string"
 
 class Symbol:
-    """Entrada en la tabla (variable, parámetro, función, campo)."""
     def __init__(self,
                  name: str,
                  type: Type,
@@ -32,9 +34,9 @@ class Symbol:
         self.is_const = is_const
         self.line = line
         self.col = col
-        self.offset = offset      # slot o bytes, según convención
-        self.label = label        # etiqueta TAC
-        self.is_param = is_param  # marca si es parámetro formal
+        self.offset = offset
+        self.label = label
+        self.is_param = is_param
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -49,7 +51,6 @@ class Symbol:
         }
 
 class SymbolTable:
-    """Ámbito con jerarquía, offsets y export JSON."""
     def __init__(self, parent: Optional['SymbolTable']=None, name: str="global", level: int=0):
         self.symbols: Dict[str, Symbol] = {}
         self.parent = parent
@@ -59,7 +60,6 @@ class SymbolTable:
         self.next_local = 0
         self.next_param = 0
 
-    # Inserción genérica
     def insert(self, name: str, symbol_type: Type, is_const: bool=False,
                line: Optional[int]=None, col: Optional[int]=None,
                is_param: bool=False, label: Optional[str]=None) -> bool:
@@ -86,7 +86,7 @@ class SymbolTable:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "name": self.name,
+            "scope": self.name,
             "level": self.level,
             "symbols": [s.to_dict() for s in self.symbols.values()],
             "children": [c.to_dict() for c in self.children]

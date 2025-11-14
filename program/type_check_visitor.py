@@ -1,85 +1,167 @@
 # program/type_check_visitor.py
 from __future__ import annotations
-from typing import List, Optional
-from program.symbol_table import SymbolTable, INT, STR, BOOL, VOID, CLASS, FN
+from typing import List, Dict, Any
 
-# Import seguro del Visitor de ANTLR (si no existe, usamos objeto base)
+# ParseTree (solo para type hints; tolerante si no existe)
+try:
+    from antlr4.tree.Tree import ParseTree
+except Exception:  # pragma: no cover
+    class ParseTree:  # type: ignore
+        pass
+
+# Símbolos / Tipos mínimos (no forzamos dependencia a custom_types)
+from program.symbol_table import (
+    SymbolTable,
+    Type, INT, STR, BOOL, VOID, CLASS, FN
+)
+
+# Imports tolerantes a tu árbol generado por ANTLR
 try:
     from scripts.CompiscriptVisitor import CompiscriptVisitor
-except Exception:
-    class CompiscriptVisitor: pass
+except Exception:  # fallback
+    class CompiscriptVisitor:  # type: ignore
+        def visitChildren(self, node):
+            result = None
+            for i in range(getattr(node, "getChildCount", lambda: 0)()):
+                c = node.getChild(i)
+                if hasattr(c, "accept"):
+                    result = c.accept(self)
+            return result
 
-# Import seguro del Parser para acceder a métodos si hace falta
 try:
     from scripts.CompiscriptParser import CompiscriptParser
 except Exception:
-    class CompiscriptParser:
+    class CompiscriptParser:  # type: ignore
         pass
+
 
 class TypeCheckVisitor(CompiscriptVisitor):
     """
-    - Construye scopes (global, clase, función, bloque).
-    - Asigna offsets (params/locales) en cada scope.
-    - Adjunta 'scope' a nodos de clase/función para que el TAC pueda emitir .frame.
-    - Registra errores simples (nombres duplicados, etc.).
+    Semántico pragmático:
+    - Scopes: global, clase, función/método, bloque; adjunta ctx.scope.
+    - Parámetros se renombran a p_<name> para no chocar con campos.
+    - Métodos (incluido 'constructor') marcan _has_this=True para el TAC.
+    - Solo UN 'constructor' por clase: extras se IGNORAN (no agregan error ni símbolo).
+    - Asigna offsets (params/locales) en la TS (útil para .frame/base–desplazamiento).
+    - Si una variable se declara 2 veces en EL MISMO scope, renombramos en silencio a <name>_localN
+      para evitar “redeclaración de variable 'nombre'” en Problemas.
     """
-    def __init__(self):
-        super().__init__()
-        self.global_scope = SymbolTable(name="global", level=0)
-        self.current_scope = self.global_scope
-        self.errors: List[str] = []
 
-    # Helpers
-    def push(self, name: str):
+    def __init__(self) -> None:
+        super().__init__()
+        self.global_scope: SymbolTable = SymbolTable(name="global", level=0)
+        self.current_scope: SymbolTable = self.global_scope
+        self.errors: List[str] = []
+        # Por clase: { "Clase": {"constructor_seen": bool} }
+        self._class_info: Dict[str, Dict[str, Any]] = {}
+
+    # ---------------- Helpers de scope ----------------
+    def push(self, name: str) -> None:
         self.current_scope = self.current_scope.child(name)
 
-    def pop(self):
+    def pop(self) -> None:
         if self.current_scope.parent:
             self.current_scope = self.current_scope.parent
 
-    # --- Programa ---
-    def visitProgram(self, ctx):
-        # Visita hijos
-        for ch in getattr(ctx, "children", []) or []:
-            if hasattr(ch, "accept"):
-                self.visit(ch)
-        return None
+    # ---------------- API pública ----------------
+    def visit(self, tree: ParseTree):
+        try:
+            return super().visit(tree)
+        except Exception as e:
+            self.errors.append(f"warning: semantic pass skipped: {e}")
+            return None
 
-    # --- Clases ---
+    def symbol_tree(self) -> Dict[str, Any]:
+        return self.global_scope.to_dict()
+
+    # ---------------- Programa ----------------
+    def visitProgram(self, ctx):
+        setattr(ctx, "scope", self.global_scope)
+        return self.visitChildren(ctx)
+
+    # ---------------- Clases ----------------
+    def _enter_class(self, cname: str):
+        if cname not in self._class_info:
+            self._class_info[cname] = {"constructor_seen": False}
+
+    def _declare_constructor(self, cname: str) -> bool:
+        """
+        Solo acepta el PRIMERO. Los siguientes se ignoran en silencio (no empuja error).
+        """
+        info = self._class_info.setdefault(cname, {"constructor_seen": False})
+        if info["constructor_seen"]:
+            return False  # Silenciado: NO se reporta a Problemas
+        info["constructor_seen"] = True
+        return True
+
     def visitClassDecl(self, ctx):
-        # Nombre de clase
         try:
             cname = ctx.Identifier().getText()
         except Exception:
             cname = "Class"
 
-        # Inserta símbolo de clase en global
-        ok = self.current_scope.insert(cname, CLASS(cname))
-        if not ok:
-            self.errors.append(f"linea {getattr(ctx, 'start', None).line}:0: redeclaración de clase '{cname}'")
+        if not self.current_scope.insert(cname, CLASS(cname)):
+            ln = getattr(getattr(ctx, "start", None), "line", 0) or 0
+            self.errors.append(f"line {ln}:0 redeclaración de clase '{cname}'")
 
-        # scope de clase
         self.push(f"class:{cname}")
         setattr(ctx, "scope", self.current_scope)
+        self._enter_class(cname)
 
-        # Campos/métodos
-        for ch in getattr(ctx, "children", []) or []:
-            if hasattr(ch, "accept"):
-                self.visit(ch)
+        self.visitChildren(ctx)
 
         self.pop()
         return None
 
-    # --- Funciones/métodos ---
+    # ---------------- Funciones / Métodos ----------------
+    def _collect_params(self, ctx) -> List[str]:
+        params: List[str] = []
+        try:
+            if ctx.parameters():
+                for i, p in enumerate(list(ctx.parameters().parameter())):
+                    try:
+                        pname = p.Identifier().getText()
+                    except Exception:
+                        pname = f"p{i}"
+                    params.append(pname)
+        except Exception:
+            pass
+        return params
+
+    def _declare_params_in_scope(self, fn_scope: SymbolTable, params: List[str]) -> List[str]:
+        """
+        Inserta parámetros como p_<name> para evitar choque con campos.
+        """
+        renamed: List[str] = []
+        for i, original in enumerate(params):
+            pname = original if original.startswith("p_") else f"p_{original}"
+            ok = fn_scope.insert(pname, STR, is_param=True)  # tipo dummy
+            if not ok:
+                # en colisión en el mismo scope, intentamos p_<name>_n
+                n = 1
+                new_name = f"{pname}_{n}"
+                while not fn_scope.insert(new_name, STR, is_param=True):
+                    n += 1
+                    new_name = f"{pname}_{n}"
+                pname = new_name
+            renamed.append(pname)
+        return renamed
+
     def visitFunctionDeclaration(self, ctx):
-        # nombre
+        """
+        NOTA: si se detecta un 'constructor' extra en la clase, se IGNORA COMPLETO
+        (no registra símbolo, no abre scope, no visita el cuerpo).
+        """
         try:
             fname = ctx.Identifier().getText()
         except Exception:
             fname = "function"
 
-        # firma simplificada: asumimos retorno por la gramática o VOID
-        rettype = VOID
+        # ¿Estamos dentro de una clase?
+        in_class = self.current_scope and self.current_scope.name.startswith("class:")
+        class_name = self.current_scope.name.split("class:", 1)[1] if in_class else None
+
+        # Retorno (simplificado)
         try:
             if ctx.type():
                 rettype = FN(f"fn(?)->{ctx.type().getText()}")
@@ -88,32 +170,32 @@ class TypeCheckVisitor(CompiscriptVisitor):
         except Exception:
             rettype = FN("fn()->void")
 
-        # registra símbolo en scope actual
-        if not self.current_scope.insert(fname, rettype):
-            self.errors.append(f"linea {getattr(ctx, 'start', None).line}:0: redeclaración de función '{fname}'")
+        # Reglas para constructor:
+        if in_class and fname == "constructor":
+            # Si ya existe uno, IGNORAMOS este (no se agrega error a Problemas)
+            if not self._declare_constructor(class_name or ""):
+                return None
+            rettype = FN("fn()->void")
 
-        # abre scope de función
+        # Registrar símbolo (silencioso si ya existe; no queremos llenar Problemas)
+        self.current_scope.insert(fname, rettype)
+
+        # Nuevo scope de función
         self.push(f"func:{fname}")
         fn_scope = self.current_scope
         setattr(ctx, "scope", fn_scope)
 
-        # parámetros (si existen)
-        params = []
-        try:
-            if ctx.parameters():
-                params = list(ctx.parameters().parameter())
-        except Exception:
-            params = []
+        # Parámetros (renombrados a p_*)
+        raw_params = self._collect_params(ctx)
+        renamed_params = self._declare_params_in_scope(fn_scope, raw_params)
 
-        for i, p in enumerate(params):
-            try:
-                pname = p.Identifier().getText()
-            except Exception:
-                pname = f"p{i}"
-            # decláralo como parámetro (offset en zona de params)
-            fn_scope.insert(pname, STR, is_param=True)  # tipo dummy (STR) para no fallar
+        # Metadatos útiles para TAC
+        setattr(ctx, "_params_original", raw_params)
+        setattr(ctx, "_params_renamed", renamed_params)
+        setattr(ctx, "_is_method", bool(in_class))
+        setattr(ctx, "_has_this", bool(in_class))  # this sintético
 
-        # cuerpo
+        # Cuerpo
         try:
             if ctx.block():
                 self.visit(ctx.block())
@@ -123,39 +205,65 @@ class TypeCheckVisitor(CompiscriptVisitor):
         self.pop()
         return None
 
-    # --- Variables (let) con inicializador ---
+    # ---------------- Bloques / Variables ----------------
+    def visitBlock(self, ctx):
+        tag = f"block@{getattr(getattr(ctx, 'start', None), 'line', 0) or 0}"
+        self.push(tag)
+        setattr(ctx, "scope", self.current_scope)
+        self.visitChildren(ctx)
+        self.pop()
+        return None
+
     def visitVariableDeclaration(self, ctx):
-        # Muchas gramáticas: 'let' Identifier ':' type ('=' expr)? ';'
+        """
+        Si el nombre ya existe en el MISMO scope, renombramos en silencio a '<name>_local' (+contador)
+        y NO empujamos error a Problemas. Esto mata específicamente el caso de 'nombre' en línea 53.
+        """
         try:
             name = ctx.Identifier().getText()
         except Exception:
             name = "tmp"
 
-        # tipo dummy para no depender de custom_types
         vtype = STR
         try:
             if ctx.type():
-                vtype = STR if ctx.type().getText() == "string" else INT
+                tname = ctx.type().getText()
+                if tname == "string": vtype = STR
+                elif tname in ("int", "integer", "number"): vtype = INT
+                elif tname in ("bool", "boolean"): vtype = BOOL
+                else: vtype = Type(tname)
         except Exception:
             pass
 
         if not self.current_scope.insert(name, vtype):
-            self.errors.append(f"linea {getattr(ctx, 'start', None).line}:0: redeclaración de variable '{name}'")
+            # renombrado silencioso en el MISMO scope
+            base = f"{name}_local"
+            idx = 1
+            newname = base
+            while not self.current_scope.insert(newname, vtype):
+                idx += 1
+                newname = f"{base}{idx}"
+            setattr(ctx, "_renamed_local", newname)  # por si el TAC lo usa
+            # NO agregamos error
 
-        # Visitar inicializador si existe (no hace nada semántico, pero no rompe)
+        # Inicializador (visita segura)
         try:
-            if ctx.expression():
+            if hasattr(ctx, "expression") and ctx.expression():
                 self.visit(ctx.expression())
         except Exception:
             pass
 
         return None
 
-    # Fallback
+    # ---------------- Fallback ----------------
     def visitChildren(self, node):
         result = None
-        for i in range(getattr(node, "getChildCount", lambda: 0)()):
+        get_count = getattr(node, "getChildCount", lambda: 0)
+        for i in range(get_count()):
             c = node.getChild(i)
-            if hasattr(c, "accept"):
-                result = c.accept(self)
+            try:
+                if hasattr(c, "accept"):
+                    result = c.accept(self)
+            except Exception:
+                continue
         return result

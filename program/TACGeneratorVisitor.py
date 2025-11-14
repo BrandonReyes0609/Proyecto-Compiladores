@@ -864,53 +864,73 @@ class TACGeneratorVisitor(CompiscriptVisitor):
             tag = "param" if is_param else "local"
             self.emit(f".{tag} {name}, [bp{base}]")
         self.emit(".endframe")
-
     def visitFunctionDeclaration(self, ctx):
         """
-        Emite:
-          FUNC <qual>_START:
-          BeginFunc <name> <arity>
-          ActivationRecord <name>
-          x = LoadParam 0
-          ...
-          .frame ... (si offsets)
-          ...body...
-          return (si no hubo)
-          FUNC <qual>_END:
-          EndFunc <name>
+        Prologo de función/método con:
+        - p_* = LoadParam i
+        - this = LoadParam arity-1 (si es método; el receptor se pasa AL FINAL)
+        - Inyección en constructor: setprop this, campo, p_campo (evita 'nombre = nombre')
         """
-        fname = ctx.Identifier().getText()
-        self.current_function = fname
-        self.return_seen = False
+        # nombre
+        try:
+            fname = ctx.Identifier().getText()
+        except Exception:
+            fname = "function"
 
-        is_method = self.current_class is not None
-        qual = f"{self.current_class}.{fname}" if is_method else fname
+        # ¿es método? preferimos flag del semántico; si no, usamos current_class
+        is_method = bool(getattr(ctx, "_has_this", False)) or (self.current_class is not None)
+        qual = f"{self.current_class}.{fname}" if is_method and self.current_class else fname
 
-        # parámetros
+        # parámetros crudos (por si necesitamos los nodos)
         params = []
         try:
             if ctx.parameters():
                 params = list(ctx.parameters().parameter())
         except Exception:
             params = []
-        arity = len(params)
+
+        # aridad (+1 por this si es método)
+        arity = len(params) + (1 if is_method else 0)
+
+        self.current_function = fname
+        self.return_seen = False
 
         self.emit(f"FUNC {qual}_START:")
         self.emit(f"BeginFunc {fname} {arity}")
         self.emit(f"ActivationRecord {fname}")
 
-        # Carga de parámetros formales (separado de 'param' de llamadas reales)
+        # Cargar parámetros p_* = LoadParam i
+        renameds = []
         for i, p in enumerate(params):
-            pname = p.Identifier().getText() if hasattr(p, "Identifier") else f"p{i}"
+            try:
+                pname = p.Identifier().getText()
+            except Exception:
+                pname = f"p{i}"
+            if not pname.startswith("p_"):
+                pname = f"p_{pname}"
             self.emit(f"{pname} = LoadParam {i}")
+            renameds.append(pname)
 
-        # frame si hay offsets
-        self._emit_frame_if_available(ctx)
+        # this desde el último índice si es método
+        if is_method:
+            self.emit(f"this = LoadParam {arity - 1}")
+
+        # Inyección especial para constructor: mapear p_<x> -> this.<x>
+        if fname == "constructor" and is_method and renameds:
+            for rp in renameds:
+                base = rp[2:] if rp.startswith("p_") else rp
+                self.emit(f"setprop this, {base}, {rp}")
+
+        # (opcional) frame con offsets
+        try:
+            self._emit_frame_if_available(ctx)
+        except Exception:
+            pass
 
         # cuerpo
         self.visit(ctx.block())
 
-        # return implícito
+        # return implícito si no hubo
         if not self.return_seen:
             self.emit("return")
 

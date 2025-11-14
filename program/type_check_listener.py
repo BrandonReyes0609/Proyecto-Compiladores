@@ -14,13 +14,16 @@ from SimpleLangParser import SimpleLangParser
 # program/type_check_listener.py
 # Opcional: si tu flujo usa Listener además del Visitor.
 # Aquí dejamos un esqueleto mínimo que no rompe importaciones.
+from __future__ import annotations
 
 class TypeCheckListener:
-  def __init__(self):
-    self.errors = []
-    # Puedes agregar lógica de listener si la usas.
+  """
+  Listener de ejemplo (modo consola). Solo deja la interfaz esperada.
+  """
+  def __init__(self) -> None:
+      self.errors = []
 
-    self.types = {}
+
 
   def enterMulDiv(self, ctx: SimpleLangParser.MulDivContext):
     pass
