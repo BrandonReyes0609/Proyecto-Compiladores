@@ -29,7 +29,7 @@ VSC = {
 }
 MONO = ("Consolas", 11)
 
-
+ 
 # ===== Editor con números de línea =====
 class CodeEditor(ttk.Frame):
     def __init__(self, master):
