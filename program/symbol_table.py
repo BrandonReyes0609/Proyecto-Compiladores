@@ -1,18 +1,42 @@
 # program/symbol_table.py
 import json
+from typing import Optional, Dict, Any, List
+
+# Tipos mínimos (evita dependencia a custom_types)
+class Type:
+    def __init__(self, name: str):
+        self.name = name
+    def __str__(self): return self.name
+    def __repr__(self): return self.name
+
+INT    = Type("integer")
+STR    = Type("string")
+BOOL   = Type("boolean")
+VOID   = Type("void")
+CLASS  = lambda n: Type(f"class<{n}>")
+FN     = lambda sig: Type(sig)  # ej: "fn(integer)->string"
 
 class Symbol:
-    """Entrada en la tabla (variable, constante, parámetro o función)."""
-    def __init__(self, name, type, is_const=False, line=None, col=None, offset=None, label=None):
+    """Entrada en la tabla (variable, parámetro, función, campo)."""
+    def __init__(self,
+                 name: str,
+                 type: Type,
+                 is_const: bool = False,
+                 line: Optional[int] = None,
+                 col: Optional[int] = None,
+                 offset: Optional[int] = None,
+                 label: Optional[str] = None,
+                 is_param: bool = False):
         self.name = name
         self.type = type
         self.is_const = is_const
         self.line = line
         self.col = col
-        self.offset = offset      # dirección relativa en RA
-        self.label = label        # etiqueta TAC (para funciones / globales)
+        self.offset = offset      # slot o bytes, según convención
+        self.label = label        # etiqueta TAC
+        self.is_param = is_param  # marca si es parámetro formal
 
-    def to_dict(self):
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "type": str(self.type),
@@ -21,36 +45,46 @@ class Symbol:
             "col": self.col,
             "offset": self.offset,
             "label": self.label,
+            "is_param": self.is_param,
         }
 
-
 class SymbolTable:
-    """Ámbito (scope) con jerarquía para exportar al IDE."""
-    def __init__(self, parent=None, name="global", level=0):
-        self.symbols = {}      # name -> Symbol
-        self.parent = parent   # scope padre
-        self.children = []     # sub-scopes
+    """Ámbito con jerarquía, offsets y export JSON."""
+    def __init__(self, parent: Optional['SymbolTable']=None, name: str="global", level: int=0):
+        self.symbols: Dict[str, Symbol] = {}
+        self.parent = parent
+        self.children: List['SymbolTable'] = []
         self.name = name
         self.level = level
-        self.offset_counter = 0  # nuevo: asignar offsets a locales
+        self.next_local = 0
+        self.next_param = 0
 
-    def insert(self, name, symbol_type, is_const=False, line=None, col=None, label=None):
-        """Inserta en el scope actual. False si ya existía."""
+    # Inserción genérica
+    def insert(self, name: str, symbol_type: Type, is_const: bool=False,
+               line: Optional[int]=None, col: Optional[int]=None,
+               is_param: bool=False, label: Optional[str]=None) -> bool:
         if name in self.symbols:
             return False
-        offset = self.offset_counter
-        self.offset_counter += 1
-        self.symbols[name] = Symbol(name, symbol_type, is_const, line, col, offset=offset, label=label)
+        if is_param:
+            off = self.next_param
+            self.next_param += 1
+        else:
+            off = self.next_local
+            self.next_local += 1
+        self.symbols[name] = Symbol(name, symbol_type, is_const, line, col, offset=off, label=label, is_param=is_param)
         return True
 
-    def lookup(self, name):
-        """Busca en este scope y, si no, recursivo en padres."""
+    def lookup(self, name: str) -> Optional[Symbol]:
         s = self.symbols.get(name)
-        if s:
-            return s
+        if s: return s
         return self.parent.lookup(name) if self.parent else None
 
-    def to_dict(self):
+    def child(self, name: str) -> 'SymbolTable':
+        kid = SymbolTable(parent=self, name=name, level=self.level+1)
+        self.children.append(kid)
+        return kid
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "level": self.level,
@@ -58,30 +92,6 @@ class SymbolTable:
             "children": [c.to_dict() for c in self.children]
         }
 
-    def export_json(self, path="symbol_table.json"):
+    def export_json(self, path: str="symbol_table.json"):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
-
-
-class TempManager:
-    def __init__(self):
-        self.counter = 0
-        self.free = []
-
-    def new_temp(self) -> str:
-        if self.free:
-            return self.free.pop()
-        self.counter += 1
-        return f"t{self.counter}"
-
-    def free_temp(self, t: str):
-        self.free.append(t)
-
-
-class LabelManager:
-    def __init__(self):
-        self.counter = 0
-
-    def new_label(self) -> str:
-        self.counter += 1
-        return f"L{self.counter}"

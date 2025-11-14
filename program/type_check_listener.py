@@ -1,12 +1,25 @@
+from scripts.CompiscriptListener import CompiscriptListener
+
+# imports tolerantes para tipos
+try:
+    from program.custom_types import IntType, FloatType, StringType, BoolType, NullType
+except Exception:
+    from custom_types import IntType, FloatType, StringType, BoolType, NullType
+
 # archivo nuevo
 from SimpleLangListener import SimpleLangListener
 from SimpleLangParser import SimpleLangParser
-from custom_types import IntType, FloatType, StringType, BoolType
+#from custom_types import IntType, FloatType, StringType, BoolType
 
-class TypeCheckListener(SimpleLangListener):
+# program/type_check_listener.py
+# Opcional: si tu flujo usa Listener además del Visitor.
+# Aquí dejamos un esqueleto mínimo que no rompe importaciones.
 
+class TypeCheckListener:
   def __init__(self):
     self.errors = []
+    # Puedes agregar lógica de listener si la usas.
+
     self.types = {}
 
   def enterMulDiv(self, ctx: SimpleLangParser.MulDivContext):

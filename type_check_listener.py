@@ -1,6 +1,10 @@
-from SimpleLangListener import SimpleLangListener
-from SimpleLangParser import SimpleLangParser
-from custom_types import IntType, FloatType, StringType, BoolType
+from program.SimpleLangListener import SimpleLangListener
+from program.SimpleLangParser import SimpleLangParser
+from program.custom_types import IntType, FloatType, StringType, BoolType
+# type_check_listener.py (raíz del repo)
+# Facade para compatibilidad si algún import viejo hace `from type_check_listener import ...`
+
+from program.type_check_listener import TypeCheckListener  # reexport
 
 class TypeCheckListener(SimpleLangListener):
 
