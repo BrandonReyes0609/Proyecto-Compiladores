@@ -79,6 +79,7 @@ class TACGeneratorVisitor(CompiscriptVisitor):
         self.current_function: Optional[str] = None
         self.current_class: Optional[str] = None
         self.return_seen: bool = False
+        self.instructions = [] # <-- AÑADIR ESTA LISTA
         self.tm = TempManager()
 
     # ---- utilidades base
@@ -1009,6 +1010,17 @@ class TACGeneratorVisitor(CompiscriptVisitor):
 
         self.emit(f"CLASS_{cname}_END:")
         return None
+    
+    def add_instruction(self, op, dest=None, arg1=None, arg2=None):
+        """Método helper para añadir instrucciones."""
+        self.code.append(self._format_instruction(op, dest, arg1, arg2))
+        self.instructions.append((op, dest, arg1, arg2)) # <-- AÑADIR A LA LISTA
+
+    def get_code(self):
+        return "\n".join(self.code)
+
+    def get_instructions(self): # <-- AÑADIR ESTE MÉTODO
+        return self.instructions
 
     # =========================================================
     # Return

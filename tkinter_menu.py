@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import redirect_stdout, redirect_stderr
 
-# IMPORTA la API del Driver dentro de /program
+# IMPORTA la API del Driver dentro de /progra
 from program.Driver import parse_code_from_string
 
 # Para genera

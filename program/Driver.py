@@ -41,7 +41,7 @@ from antlr4.error.ErrorListener import ErrorListener
 from program.symbol_table import SymbolTable
 from program.type_check_visitor import TypeCheckVisitor
 from program.TACGeneratorVisitor import TACGeneratorVisitor
-
+from program.mips_generator import MipsGenerator 
 
 # ---------- Listener de errores sintácticos ----------
 class CollectingErrorListener(ErrorListener):
@@ -88,59 +88,53 @@ def _format_messages(errors: List[Dict[str, Any]], timings: Dict[str, int], tac_
 def parse_code_from_string(source: str) -> Dict[str, Any]:
     t0 = time.perf_counter()
 
-    # Lexer / Parser desde STRING
+    # Lexer / Parser
     lexer = CompiscriptLexer(InputStream(source))
     tokens = CommonTokenStream(lexer)
     parser = CompiscriptParser(tokens)
-
     syn = CollectingErrorListener()
     parser.removeErrorListeners()
     parser.addErrorListener(syn)
-
-    tree = parser.program()  # regla inicial
+    tree = parser.program()
     parse_tree_str = tree.toStringTree(recog=parser)
-
     t1 = time.perf_counter()
 
-    # Semántico si no hubo errores sintácticos
-    sem_struct: List[Dict[str, Any]] = []
-    symbols_tree = None
-    analyzer_errors: List[str] = []
+    # Semántico
+    sem_struct, symbols_tree, analyzer_errors = [], None, []
     if not syn.errors:
-        type_checker = TypeCheckVisitor()  # construye/gestiona scopes y offsets
+        type_checker = TypeCheckVisitor()
         type_checker.visit(tree)
-        analyzer_errors = type_checker.errors[:]  # lista de strings
+        analyzer_errors = type_checker.errors[:]
         sem_struct = _semantic_str_to_struct(analyzer_errors)
-        # export para IDE
         try:
             symbols_tree = type_checker.global_scope.to_dict()
         except Exception:
             symbols_tree = None
-        # y además export JSON si quieres
-        try:
-            type_checker.global_scope.export_json(str(ROOT / "symbol_table.json"))
-        except Exception:
-            pass
-
     t2 = time.perf_counter()
 
     # IR/TAC
-    ir  = ""
-    asm = ""
+    ir, asm = "", ""
     tac_ok = False
     if not syn.errors and not analyzer_errors:
         tac = TACGeneratorVisitor()
         tac.visit(tree)
-        ir = tac.get_code()
+        ir = tac.get_code() # Obtenemos el string del TAC
         tac_ok = True
-
     t3 = time.perf_counter()
+    
+    # Generación de MIPS
+    if tac_ok:
+        # Pasamos el STRING del código intermedio (ir) al generador
+        mips_gen = MipsGenerator(ir, symbols_tree) 
+        asm = mips_gen.generate()
+    
+    t4 = time.perf_counter()
 
     timings = {
         "parse_ms":    round((t1 - t0) * 1000),
         "semantic_ms": round((t2 - t1) * 1000),
-        "ir_ms":       round((t3 - t2) * 1000) if tac_ok else 0,
-        "asm_ms":      0,
+        "ir_ms":       round((t3 - t2) * 1000),
+        "asm_ms":      round((t4 - t3) * 1000),     
     }
 
     all_errors = syn.errors + sem_struct
@@ -151,7 +145,7 @@ def parse_code_from_string(source: str) -> Dict[str, Any]:
         "messages": messages,
         "actions": "",
         "ir": ir,
-        "asm": asm,
+        "asm": asm, # El código MIPS se devuelve aquí
         "errors": all_errors,
         "symbols": symbols_tree,
         "timings": timings,
@@ -168,6 +162,8 @@ def main(argv):
     print(out["messages"])
     if out.get("ir"):
         print("\n=== TAC ===\n" + out["ir"])
+    if out.get("asm"):
+        print("\n=== MIPS ASM ===\n" + out["asm"])
 
 if __name__ == '__main__':
     main(sys.argv)
